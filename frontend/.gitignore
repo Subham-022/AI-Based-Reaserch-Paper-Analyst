@@ -1,0 +1,67 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Python virtual environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Uploaded papers and application data
+backend/data/
+backend/storage/
+backend/uploads/
+uploads/
+storage/
+
+# Vector databases and generated indexes
+chroma_db/
+chroma/
+vector_store/
+
+# Model weights and training outputs
+*.safetensors
+*.pt
+*.pth
+*.bin
+checkpoints/
+training/outputs/
+
+# Generated reports and temporary files
+*.tmp
+
