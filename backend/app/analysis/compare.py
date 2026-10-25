@@ -3,7 +3,10 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from app.llm.base import LLMProvider
-from app.llm.prompts import COMPARISON_PROMPT
+from app.llm.prompts import (
+    COMPARISON_PROMPT,
+    COMPARISON_SYSTEM,
+)
 
 
 class SourceCitation(BaseModel):
@@ -42,12 +45,12 @@ def compare_papers(
         for paper_id, content in papers.items()
     )
 
-    prompt = COMPARISON_PROMPT + (
-        "\n\nPaper contents:\n"
-        + formatted
+    prompt = COMPARISON_PROMPT.format(
+        evidence=formatted
     )
 
     return llm.generate_json(
         prompt,
         ComparisonResult,
+        system=COMPARISON_SYSTEM,
     )

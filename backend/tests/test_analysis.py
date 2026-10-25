@@ -1,6 +1,10 @@
 from app.analysis.extract import (
     FindingsResult,
 )
+from app.analysis.compare import (
+    ComparisonResult,
+    compare_papers,
+)
 from app.analysis.qa import (
     answer_question,
 )
@@ -72,6 +76,41 @@ def test_summary_uses_llm() -> None:
     )
 
     assert llm.calls == 2
+
+
+def test_comparison_includes_paper_evidence_and_grounding_instructions() -> None:
+    expected = ComparisonResult(papers=[])
+    captured = {}
+
+    class ComparisonLLM:
+        def generate_json(
+            self,
+            prompt: str,
+            schema,
+            system: str | None = None,
+        ):
+            captured["prompt"] = prompt
+            captured["schema"] = schema
+            captured["system"] = system
+            return expected
+
+    result = compare_papers(
+        ComparisonLLM(),
+        {
+            "paper-1": "Paper one evidence.",
+            "paper-2": "Paper two evidence.",
+        },
+    )
+
+    assert result is expected
+    assert captured["schema"] is ComparisonResult
+    assert "===== PAPER paper-1 =====" in captured["prompt"]
+    assert "Paper one evidence." in captured["prompt"]
+    assert "===== PAPER paper-2 =====" in captured["prompt"]
+    assert "Paper two evidence." in captured["prompt"]
+    assert "{evidence}" not in captured["prompt"]
+    assert "only using the supplied evidence" in captured["system"]
+    assert "Do not invent missing information." in captured["system"]
 
 
 def test_question_without_evidence_returns_not_found() -> None:
