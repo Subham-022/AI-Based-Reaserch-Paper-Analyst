@@ -52,7 +52,6 @@ def test_generate_json_retries_once() -> None:
     assert result.answer == "valid"
     assert client.calls == 2
 
-
 def test_generate_json_fails_after_retry() -> None:
     client = FakeLLM(
         [
@@ -71,3 +70,20 @@ def test_generate_json_fails_after_retry() -> None:
         )
 
     assert client.calls == 2
+
+
+def test_generate_json_does_not_retry_provider_errors() -> None:
+    class UnavailableLLM(FakeLLM):
+        def generate(self, prompt: str, system: str | None = None) -> str:
+            self.calls += 1
+            raise LLMError("provider timed out")
+
+    client = UnavailableLLM([])
+
+    with pytest.raises(LLMError, match="provider timed out"):
+        client.generate_json(
+            "Answer the question.",
+            Output,
+        )
+
+    assert client.calls == 1

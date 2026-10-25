@@ -114,9 +114,13 @@ def build_markdown(
     for limitation in report.limitations.limitations:
         lines.append(
             (
-                f"- {limitation.text} "
-                f"({limitation.type}, "
-                f"p. {limitation.page})"
+                f"- {limitation.text} ({limitation.type})"
+                if limitation.page <= 0
+                else (
+                    f"- {limitation.text} "
+                    f"({limitation.type}, "
+                    f"p. {limitation.page})"
+                )
             )
         )
 

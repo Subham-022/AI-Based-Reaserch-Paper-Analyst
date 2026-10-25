@@ -1,10 +1,12 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import {
   AlertCircle,
   BookOpen,
   CheckCircle2,
+  Download,
   FileText,
   LoaderCircle,
   MessageCircle,
@@ -17,6 +19,7 @@ import {
 import {
   askPaperQuestion,
   createChatSession,
+  exportPaperReport,
   getChatMessages,
   getPaper,
   getPaperStatus,
@@ -24,9 +27,11 @@ import {
   listPapers,
   type Citation,
   type ChatMessage,
+  type ReportFormat,
 } from '../api/papers';
 
 import UploadPaperModal from '../components/UploadPaperModal';
+import SourcePassageDialog from '../components/SourcePassageDialog';
 
 type Tab = 'summary' | 'details' | 'chat';
 
@@ -130,6 +135,11 @@ function InformationField({
 }
 
 function CitationList({ citations }: { citations: Citation[] }) {
+  const [selectedSource, setSelectedSource] = useState<{
+    paperId: string;
+    chunkId: string;
+  } | null>(null);
+
   if (citations.length === 0) {
     return null;
   }
@@ -144,15 +154,38 @@ function CitationList({ citations }: { citations: Citation[] }) {
             key={`${index}-${readableCitationValue(citation)}`}
             className="rounded-md bg-slate-50 p-3 text-xs leading-5 text-slate-600"
           >
-            <span className="font-semibold text-slate-800">
-              Source {index + 1}
-            </span>
+            {citation.paper_id && citation.chunk_id ? (
+              <button
+                type="button"
+                onClick={() =>
+                  setSelectedSource({
+                    paperId: citation.paper_id!,
+                    chunkId: citation.chunk_id!,
+                  })
+                }
+                className="font-semibold text-blue-700 underline decoration-blue-300 underline-offset-2 hover:text-blue-900 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700"
+              >
+                Source {index + 1}
+                {citation.page ? ` · page ${citation.page}` : ''}
+              </button>
+            ) : (
+              <span className="font-semibold text-slate-800">
+                Source {index + 1}
+              </span>
+            )}
             <p className="mt-1 break-words">
               {readableCitationValue(citation)}
             </p>
           </li>
         ))}
       </ol>
+      {selectedSource && (
+        <SourcePassageDialog
+          paperId={selectedSource.paperId}
+          chunkId={selectedSource.chunkId}
+          onClose={() => setSelectedSource(null)}
+        />
+      )}
     </div>
   );
 }
@@ -167,6 +200,8 @@ function LibraryPage() {
   const [question, setQuestion] = useState('');
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [reportFormat, setReportFormat] = useState<ReportFormat | null>(null);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   const chatEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -265,12 +300,6 @@ function LibraryPage() {
   });
 
   useEffect(() => {
-    setChatSessionId(null);
-    setQuestion('');
-    setChatError(null);
-  }, [selectedPaperId]);
-
-  useEffect(() => {
     chatEndRef.current?.scrollIntoView({
       behavior: 'smooth',
       block: 'end',
@@ -352,8 +381,35 @@ function LibraryPage() {
     }
   }
 
+  async function exportReport(format: ReportFormat) {
+    if (!selectedPaperId || reportFormat) {
+      return;
+    }
+
+    setReportFormat(format);
+    setReportError(null);
+
+    try {
+      await exportPaperReport(selectedPaperId, format);
+    } catch (exportError) {
+      setReportError(
+        exportError instanceof Error
+          ? exportError.message
+          : 'The report could not be generated.',
+      );
+    } finally {
+      setReportFormat(null);
+    }
+  }
+
   const summary = summaryQuery.data;
   const keyPoints = cleanKeyPoints(summary?.key_points);
+  const problem = summary?.problem ?? keyPoints[0];
+  const approach = summary?.approach ?? keyPoints[1];
+  const mainResult = summary?.main_result ?? keyPoints[2];
+  const limitations = cleanKeyPoints(
+    summary?.limitations ?? keyPoints.slice(3),
+  );
 
   const messages: ChatMessage[] = messagesQuery.data?.items ?? [];
 
@@ -511,13 +567,21 @@ function LibraryPage() {
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setUploadOpen(true)}
-              className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
-            >
-              Add paper
-            </button>
+            <div className="flex items-center gap-2">
+              <Link
+                to="/compare"
+                className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+              >
+                Compare papers
+              </Link>
+              <button
+                type="button"
+                onClick={() => setUploadOpen(true)}
+                className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50"
+              >
+                Add paper
+              </button>
+            </div>
           </header>
 
           <section className="mx-auto max-w-6xl px-6 py-8">
@@ -557,21 +621,48 @@ function LibraryPage() {
                       </p>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void summaryQuery.refetch();
-                        void detailsQuery.refetch();
-                        void queryClient.invalidateQueries({
-                          queryKey: ['papers'],
-                        });
-                      }}
-                      className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                    >
-                      <RefreshCw size={14} />
-                      Refresh
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void summaryQuery.refetch();
+                          void detailsQuery.refetch();
+                          void queryClient.invalidateQueries({
+                            queryKey: ['papers'],
+                          });
+                        }}
+                        className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+                      >
+                        <RefreshCw size={14} />
+                        Refresh
+                      </button>
+                      {(['pdf', 'md'] as const).map((format) => (
+                        <button
+                          key={format}
+                          type="button"
+                          onClick={() => void exportReport(format)}
+                          disabled={
+                            currentStatus !== 'ready' ||
+                            reportFormat !== null
+                          }
+                          className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <Download size={14} />
+                          {reportFormat === format
+                            ? `Generating ${format.toUpperCase()}...`
+                            : `Export ${format.toUpperCase()}`}
+                        </button>
+                      ))}
+                    </div>
                   </div>
+                  {reportError && (
+                    <p
+                      role="alert"
+                      className="mt-3 text-sm text-red-700"
+                    >
+                      {reportError}
+                    </p>
+                  )}
                 </div>
 
                 <nav
@@ -683,38 +774,36 @@ function LibraryPage() {
                               : 'A summary was not generated. Refresh the analysis or check the backend logs.'}
                           </SectionCard>
 
-                          <SectionCard title="Key findings and analysis">
-                            {keyPoints.length > 0 ? (
+                          <SectionCard title="Problem statement">
+                            {problem ??
+                              'The research problem was not available in the generated analysis.'}
+                          </SectionCard>
+
+                          <SectionCard title="Methodology and approach">
+                            {approach ??
+                              'The methodology was not available in the generated analysis.'}
+                          </SectionCard>
+
+                          <SectionCard title="Main result">
+                            {mainResult ??
+                              'The main result was not available in the generated analysis.'}
+                          </SectionCard>
+
+                          <SectionCard title="Reported limitations">
+                            {limitations.length > 0 ? (
                               <ul className="list-disc space-y-2 pl-5">
-                                {keyPoints.map((point, index) => (
-                                  <li key={`${index}-${point}`}>{point}</li>
+                                {limitations.map((limitation, index) => (
+                                  <li key={`${index}-${limitation}`}>
+                                    {limitation}
+                                  </li>
                                 ))}
                               </ul>
                             ) : (
                               <p className="text-slate-500">
-                                No key findings were returned by the current
-                                summary API.
+                                No limitations were returned in the generated
+                                analysis.
                               </p>
                             )}
-                          </SectionCard>
-
-                          <SectionCard title="Problem statement">
-                            {keyPoints[0] ??
-                              'The backend does not currently return a separate problem field. The summary schema should be expanded to expose it.'}
-                          </SectionCard>
-
-                          <SectionCard title="Methodology and approach">
-                            {keyPoints[1] ??
-                              'The backend does not currently return a separate methodology field. This information is not available in the current API response.'}
-                          </SectionCard>
-
-                          <SectionCard title="Results and limitations">
-                            <p>
-                              The current API response does not distinguish
-                              experimental results from limitations. The
-                              available key points are shown above without
-                              inferring missing findings.
-                            </p>
                           </SectionCard>
 
                           <div className="rounded-lg border border-slate-200 bg-white p-5">

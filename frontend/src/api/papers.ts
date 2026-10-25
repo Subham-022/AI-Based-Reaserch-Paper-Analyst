@@ -31,12 +31,28 @@ export interface PaperDetails {
 export interface PaperSummary {
   paper_id: string;
   summary: string;
+  problem?: string;
+  approach?: string;
+  main_result?: string;
+  limitations?: string[];
   key_points: string[];
   citations: Citation[];
 }
 
 export interface Citation {
+  paper_id?: string;
+  chunk_id?: string;
+  page?: number;
+  section?: string;
   [key: string]: unknown;
+}
+
+export interface SourcePassage {
+  paper_id: string;
+  chunk_id: string;
+  page: number;
+  section: string;
+  text: string;
 }
 
 export interface ChatMessage {
@@ -67,6 +83,30 @@ export interface PaperStatus {
   progress: number;
   stage: string | null;
   error: string | null;
+}
+
+export type ReportFormat = 'md' | 'pdf';
+
+export interface ComparisonCell {
+  paper_id: string;
+  value: string;
+  citations: Array<{
+    paper_id: string;
+    chunk_id: string;
+    page: number;
+    section: string;
+  }>;
+}
+
+export interface ComparisonRow {
+  dimension: string;
+  cells: ComparisonCell[];
+}
+
+export interface PaperComparisonResponse {
+  papers: Array<{ id: string; title: string }>;
+  rows: ComparisonRow[];
+  charts: string[];
 }
 
 async function getErrorMessage(
@@ -185,6 +225,17 @@ export async function getPaperSummary(
   );
 }
 
+export async function getPaperSource(
+  paperId: string,
+  chunkId: string,
+): Promise<SourcePassage> {
+  return request<SourcePassage>(
+    `/papers/${encodeURIComponent(paperId)}/source/${encodeURIComponent(chunkId)}`,
+    undefined,
+    'The cited source passage could not be loaded.',
+  );
+}
+
 export async function getPaperStatus(
   paperId: string,
 ): Promise<PaperStatus> {
@@ -241,5 +292,70 @@ export async function askPaperQuestion(
       }),
     },
     'The question could not be answered.',
+  );
+}
+
+export async function exportPaperReport(
+  paperId: string,
+  format: ReportFormat,
+): Promise<void> {
+  const report = await request<{ download_url: string }>(
+    '/reports',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        paper_ids: [paperId],
+        format,
+      }),
+    },
+    'The report could not be generated.',
+  );
+
+  let response: Response;
+
+  try {
+    response = await fetch(
+      new URL(report.download_url, API_BASE_URL),
+    );
+  } catch {
+    throw new Error('The generated report could not be downloaded.');
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      await getErrorMessage(
+        response,
+        'The generated report could not be downloaded.',
+      ),
+    );
+  }
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = `research-paper-report.${format}`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+export async function comparePapers(
+  paperIds: string[],
+): Promise<PaperComparisonResponse> {
+  return request<PaperComparisonResponse>(
+    '/compare',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ paper_ids: paperIds }),
+    },
+    'The selected papers could not be compared.',
   );
 }

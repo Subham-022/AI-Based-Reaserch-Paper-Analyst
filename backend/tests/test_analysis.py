@@ -140,6 +140,213 @@ def test_question_preserves_valid_citation() -> None:
     assert len(result.citations) == 1
     assert result.citations[0].page == 4
 
+
+def test_question_attaches_retrieved_citation_when_llm_omits_it() -> None:
+    from app.analysis.qa import QAResult
+
+    class CitationOmittingLLM:
+        def generate_json(
+            self,
+            prompt: str,
+            schema,
+            system: str | None = None,
+        ):
+            assert schema is QAResult
+            return QAResult(
+                answer="The model uses a transformer.",
+                confidence=0.9,
+            )
+
+    citation = Citation(
+        paper_id="paper-1",
+        chunk_id="paper-1:1",
+        section="methods",
+        page=4,
+        text="The model uses a transformer.",
+        score=0.91,
+    )
+
+    result = answer_question(
+        llm=CitationOmittingLLM(),
+        question="What model is used?",
+        citations=[citation],
+    )
+
+    assert isinstance(result, QAResult)
+    assert result.answer == "The model uses a transformer."
+    assert len(result.citations) == 1
+    assert result.citations[0].paper_id == citation.paper_id
+    assert result.citations[0].chunk_id == citation.chunk_id
+
+
+def test_question_uses_retrieved_metadata_for_citations() -> None:
+    from app.analysis.qa import QAResult
+
+    class IncorrectCitationLLM:
+        def generate_json(
+            self,
+            prompt: str,
+            schema,
+            system: str | None = None,
+        ):
+            assert schema is QAResult
+            return QAResult(
+                answer="The model uses a transformer.",
+                citations=[
+                    {
+                        "paper_id": "paper-1",
+                        "chunk_id": "paper-1:1",
+                        "page": 999,
+                        "section": "invented",
+                    }
+                ],
+            )
+
+    citation = Citation(
+        paper_id="paper-1",
+        chunk_id="paper-1:1",
+        section="methods",
+        page=4,
+        text="The model uses a transformer.",
+        score=0.91,
+    )
+
+    result = answer_question(
+        llm=IncorrectCitationLLM(),
+        question="What model is used?",
+        citations=[citation],
+    )
+
+    assert len(result.citations) == 1
+    assert result.citations[0].page == 4
+    assert result.citations[0].section == "methods"
+
+
+def test_question_replaces_unrelated_answer_with_relevant_evidence() -> None:
+    from app.analysis.qa import QAResult
+
+    class UnrelatedAnswerLLM:
+        def generate_json(
+            self,
+            prompt: str,
+            schema,
+            system: str | None = None,
+        ):
+            assert schema is QAResult
+            return QAResult(
+                answer=(
+                    "The model was trained on 2637 images and tested "
+                    "on 660 images."
+                ),
+                citations=[
+                    {
+                        "paper_id": "paper-1",
+                        "chunk_id": "paper-1:1",
+                        "page": 14,
+                        "section": "introduction",
+                    }
+                ],
+                confidence=0.9,
+            )
+
+    citation = Citation(
+        paper_id="paper-1",
+        chunk_id="paper-1:1",
+        section="introduction",
+        page=14,
+        text=(
+            "The method achieved an accuracy of 88.95% and an "
+            "F1-score of 0.909."
+        ),
+        score=0.91,
+    )
+
+    result = answer_question(
+        llm=UnrelatedAnswerLLM(),
+        question="What evaluation metrics and scores are reported?",
+        citations=[citation],
+    )
+
+    assert "2637" not in result.answer
+    assert "88.95%" in result.answer
+    assert len(result.answer) < 500
+    assert result.confidence == 0.0
+    assert len(result.citations) == 1
+    assert result.citations[0].chunk_id == citation.chunk_id
+
+
+def test_question_fallback_extracts_only_relevant_sentences() -> None:
+    from app.analysis.qa import QAResult
+    from app.llm.base import LLMError
+
+    class FailingLLM:
+        def generate_json(self, prompt: str, schema, system: str | None = None):
+            assert schema is QAResult
+            raise LLMError("model timed out")
+
+    citation = Citation(
+        paper_id="paper-1",
+        chunk_id="paper-1:1",
+        section="results",
+        page=7,
+        text=(
+            "The dataset contains 500 images. "
+            "The model achieved 91% accuracy and an F1-score of 0.88. "
+            "The authors used a convolutional neural network."
+        ),
+        score=0.91,
+    )
+
+    result = answer_question(
+        llm=FailingLLM(),
+        question="What accuracy metrics and scores are reported?",
+        citations=[citation],
+    )
+
+    assert "91% accuracy" in result.answer
+    assert "F1-score of 0.88" in result.answer
+    assert "500 images" not in result.answer
+    assert "convolutional neural network" not in result.answer
+    assert len(result.citations) == 1
+
+
+def test_question_falls_back_to_evidence_when_llm_fails() -> None:
+    from app.analysis.qa import QAResult
+    from app.llm.base import LLMError
+
+    class FailingLLM:
+        def generate_json(
+            self,
+            prompt: str,
+            schema,
+            system: str | None = None,
+        ):
+            assert schema is QAResult
+            raise LLMError("model timed out")
+
+    citation = Citation(
+        paper_id="paper-1",
+        chunk_id="paper-1:1",
+        section="results",
+        page=7,
+        text="The model achieved 91% accuracy on the test set.",
+        score=0.91,
+    )
+
+    result = answer_question(
+        llm=FailingLLM(),
+        question="What accuracy was achieved?",
+        citations=[citation],
+    )
+
+    assert "91% accuracy" in result.answer
+    assert result.confidence == 0.0
+    assert len(result.citations) == 1
+    assert result.citations[0].page == 7
+
+
+
+
 def test_long_section_is_summarized_without_truncation() -> None:
     llm = FakeLLM()
 

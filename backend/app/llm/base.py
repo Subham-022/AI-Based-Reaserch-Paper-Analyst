@@ -95,7 +95,10 @@ class LLMProvider(ABC):
                 print("LLM VALIDATION ERROR:")
                 print(exc)
 
-            except (ValueError, LLMError) as exc:
+            except LLMError:
+                raise
+
+            except ValueError as exc:
                 last_error = exc
                 print("LLM JSON ERROR:")
                 print(exc)

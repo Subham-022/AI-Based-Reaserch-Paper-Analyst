@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 
 import LibraryPage from './pages/LibraryPage';
+import ComparePage from './pages/ComparePage';
 
 function App() {
   return (
@@ -18,13 +19,7 @@ function App() {
 
         <Route
           path="/compare"
-          element={
-            <main className="min-h-screen bg-slate-50 p-8">
-              <h1 className="text-2xl font-semibold text-slate-900">
-                Compare Papers
-              </h1>
-            </main>
-          }
+          element={<ComparePage />}
         />
 
         <Route

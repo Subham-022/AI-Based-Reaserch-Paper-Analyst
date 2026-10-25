@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
@@ -16,6 +17,8 @@ from sqlmodel import Session, select
 from app.config import REPORT_DIR
 from app.db import get_session
 from app.models import Paper, Report
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter(
@@ -42,36 +45,6 @@ def _error(
                 "message": message,
             }
         },
-    )
-
-
-def _get_llm():
-    from app.config import (
-        LLM_API_KEY,
-        LLM_BASE_URL,
-        LLM_MODEL,
-        LLM_PROVIDER,
-        OLLAMA_BASE_URL,
-    )
-
-    if LLM_PROVIDER == "ollama":
-        from app.llm.ollama_client import (
-            OllamaClient,
-        )
-
-        return OllamaClient(
-            base_url=OLLAMA_BASE_URL,
-            model=LLM_MODEL,
-        )
-
-    from app.llm.anthropic_client import (
-        AnthropicClient,
-    )
-
-    return AnthropicClient(
-        api_key=LLM_API_KEY,
-        model=LLM_MODEL,
-        base_url=LLM_BASE_URL,
     )
 
 
@@ -123,11 +96,22 @@ def create_report(
 
         papers.append(paper)
 
+    generated_paths: list[Path] = []
+
     try:
         from app.analysis.extract import (
-            extract_findings,
-            analyze_methodology,
-            extract_limitations,
+            Evidence,
+            Finding,
+            FindingsResult,
+            Limitation,
+            LimitationsResult,
+            MethodologyResult,
+        )
+        from app.analysis.compare import (
+            ComparisonCell,
+            ComparisonResult,
+            PaperComparison,
+            SourceCitation,
         )
         from app.analysis.summarize import (
             SummaryResult,
@@ -136,8 +120,6 @@ def create_report(
             ReportData,
             build_markdown,
         )
-
-        llm = _get_llm()
 
         primary = papers[0]
 
@@ -158,27 +140,112 @@ def create_report(
                 paper.id
                 for paper in papers
             ],
+            top_k=5,
         )
 
-        content = "\n\n".join(
-            item.text
-            for item in citations
+        findings = FindingsResult(
+            findings=[
+                Finding(
+                    finding="Retrieved evidence",
+                    evidence=citation.text,
+                    page=citation.page,
+                )
+                for citation in citations
+            ]
         )
 
-        findings = extract_findings(
-            llm,
-            content,
+        methodology = MethodologyResult(
+            method=summary.approach,
+            experimental_setup=(
+                "See the page-cited retrieved evidence above."
+            ),
+            evidence=[
+                Evidence(
+                    text=citation.text,
+                    page=citation.page,
+                )
+                for citation in citations
+            ],
         )
 
-        methodology = analyze_methodology(
-            llm,
-            content,
+        limitations = LimitationsResult(
+            limitations=[
+                Limitation(
+                    text=limitation,
+                    type="from saved paper analysis",
+                    page=0,
+                )
+                for limitation in summary.limitations
+            ]
         )
 
-        limitations = extract_limitations(
-            llm,
-            content,
-        )
+        comparison = None
+        if len(papers) > 1:
+            from app.api.compare import (
+                CompareRequest,
+                compare_papers,
+            )
+
+            comparison_response = compare_papers(
+                CompareRequest(
+                    paper_ids=[
+                        paper.id
+                        for paper in papers
+                    ]
+                ),
+                session,
+            )
+            comparison_rows = {
+                row["dimension"]: row["cells"]
+                for row in comparison_response["rows"]
+            }
+            comparison_papers = []
+
+            for paper in papers:
+                cells = {
+                    dimension: next(
+                        (
+                            cell
+                            for cell in comparison_rows[dimension]
+                            if cell["paper_id"] == paper.id
+                        ),
+                        {
+                            "value": "Not reported in retrieved evidence.",
+                            "citations": [],
+                        },
+                    )
+                    for dimension in (
+                        "problem",
+                        "method",
+                        "dataset",
+                        "metrics",
+                        "results",
+                        "limitations",
+                    )
+                }
+
+                comparison_papers.append(
+                    PaperComparison(
+                        paper_id=paper.title
+                        or paper.original_filename,
+                        **{
+                            dimension: ComparisonCell(
+                                value=cell["value"],
+                                citations=[
+                                    SourceCitation(
+                                        **citation
+                                    )
+                                    for citation in cell["citations"]
+                                ],
+                            )
+                            for dimension, cell in cells.items()
+                        },
+                    )
+                )
+
+            comparison = ComparisonResult(
+                papers=comparison_papers
+            )
 
         report_data = ReportData(
             title=(
@@ -186,6 +253,9 @@ def create_report(
                 if len(papers) > 1
                 else (
                     primary.title
+                    or Path(
+                        primary.original_filename
+                    ).stem
                     or "Research Paper Analysis"
                 )
             ),
@@ -193,6 +263,7 @@ def create_report(
             findings=findings,
             methodology=methodology,
             limitations=limitations,
+            comparison=comparison,
         )
 
         markdown = build_markdown(
@@ -204,6 +275,9 @@ def create_report(
         markdown_path = (
             REPORT_DIR
             / f"{report_id}.md"
+        )
+        generated_paths.append(
+            markdown_path
         )
 
         markdown_path.write_text(
@@ -221,6 +295,9 @@ def create_report(
             pdf_path = (
                 REPORT_DIR
                 / f"{report_id}.pdf"
+            )
+            generated_paths.append(
+                pdf_path
             )
 
             export_pdf(
@@ -258,6 +335,16 @@ def create_report(
         raise
 
     except Exception as exc:
+        session.rollback()
+        for path in generated_paths:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception(
+                    "Failed to remove incomplete report file %s",
+                    path,
+                )
+        logger.exception("Research report generation failed")
         raise _error(
             502,
             "REPORT_FAILED",

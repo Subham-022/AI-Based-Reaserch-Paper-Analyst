@@ -10,8 +10,6 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.config import (
-    CHROMA_DIR,
-    EMBEDDING_MODEL,
     RETRIEVAL_MIN_SCORE,
 )
 from app.db import get_session
@@ -73,6 +71,7 @@ def _get_llm():
         return OllamaClient(
             base_url=OLLAMA_BASE_URL,
             model=LLM_MODEL,
+            timeout=15.0,
         )
 
     if LLM_PROVIDER == "anthropic":
@@ -102,22 +101,9 @@ def _get_llm():
 
 def _get_retriever():
     """Open the existing persistent vector index for paper retrieval."""
-    from app.retrieval.embedder import Embedder
-    from app.retrieval.search import Retriever
-    from app.retrieval.store import VectorStore
+    from app.retrieval.search import get_retriever
 
-    embedder = Embedder(
-        model_name=EMBEDDING_MODEL
-    )
-    store = VectorStore(
-        CHROMA_DIR
-    )
-
-    return Retriever(
-        store=store,
-        embedder=embedder,
-        confidence_threshold=RETRIEVAL_MIN_SCORE,
-    )
+    return get_retriever()
 
 
 @router.post("/sessions")

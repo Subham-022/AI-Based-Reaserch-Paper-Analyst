@@ -1,5 +1,6 @@
 from typing import Any
 
+import app.retrieval.search as search_module
 from app.retrieval.search import (
     Retriever,
 )
@@ -129,3 +130,53 @@ def test_retrieval_discards_low_confidence_results() -> None:
     assert results[0].paper_id == (
         "paper-1"
     )
+
+
+def test_configured_search_uses_persistent_retriever(
+    monkeypatch,
+) -> None:
+    embedder_count = 0
+    store_count = 0
+
+    class ConfiguredEmbedder(FakeEmbedder):
+        def __init__(self, model_name: str) -> None:
+            nonlocal embedder_count
+            embedder_count += 1
+            assert model_name
+
+    def configured_store(path):
+        nonlocal store_count
+        store_count += 1
+        return FakeStore()
+
+    monkeypatch.setattr(
+        search_module,
+        "Embedder",
+        ConfiguredEmbedder,
+    )
+    monkeypatch.setattr(
+        search_module,
+        "VectorStore",
+        configured_store,
+    )
+
+    search_module._get_configured_retriever.cache_clear()
+    try:
+        results = search_module.search(
+            query="What method was used?",
+            paper_ids=["paper-1"],
+            section="methods",
+            top_k=3,
+        )
+        search_module.search(
+            query="What result was reported?",
+            paper_ids=["paper-1"],
+        )
+    finally:
+        search_module._get_configured_retriever.cache_clear()
+
+    assert len(results) == 1
+    assert results[0].paper_id == "paper-1"
+    assert results[0].section == "methods"
+    assert embedder_count == 1
+    assert store_count == 1

@@ -178,6 +178,28 @@ class VectorStore:
 
         return rows
 
+    def get_chunk(
+        self,
+        chunk_id: str,
+    ) -> dict[str, Any] | None:
+        result = self.collection.get(
+            ids=[chunk_id],
+            include=[
+                "documents",
+                "metadatas",
+            ],
+        )
+        documents = result.get("documents") or []
+        metadatas = result.get("metadatas") or []
+
+        if not documents or not metadatas:
+            return None
+
+        return {
+            "text": documents[0],
+            "metadata": metadatas[0],
+        }
+
     def delete_paper(
         self,
         paper_id: str,

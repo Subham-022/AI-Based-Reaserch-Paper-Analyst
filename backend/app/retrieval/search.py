@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 from app.retrieval.embedder import Embedder
 from app.retrieval.store import VectorStore
@@ -99,3 +100,38 @@ class Retriever:
             )
 
         return citations
+
+
+@lru_cache(maxsize=1)
+def _get_configured_retriever() -> Retriever:
+    from app.config import (
+        CHROMA_DIR,
+        EMBEDDING_MODEL,
+        RETRIEVAL_MIN_SCORE,
+    )
+
+    return Retriever(
+        store=VectorStore(CHROMA_DIR),
+        embedder=Embedder(model_name=EMBEDDING_MODEL),
+        confidence_threshold=RETRIEVAL_MIN_SCORE,
+    )
+
+
+def get_retriever() -> Retriever:
+    """Return the process-cached retriever for direct API use."""
+    return _get_configured_retriever()
+
+
+def search(
+    query: str,
+    paper_ids: list[str] | None = None,
+    section: str | None = None,
+    top_k: int = 12,
+) -> list[Citation]:
+    """Search the configured persistent index for cited passages."""
+    return get_retriever().search(
+        query=query,
+        paper_ids=paper_ids,
+        section=section,
+        top_k=top_k,
+    )

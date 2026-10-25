@@ -1,11 +1,53 @@
 from __future__ import annotations
 
+import logging
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
 
 from app.db import get_session
 from app.models import Paper
+from app.retrieval.search import Citation
+
+logger = logging.getLogger(__name__)
+
+DIMENSION_EVIDENCE_PATTERNS = {
+    "problem": re.compile(
+        r"\b(problem|objective|aim|challenge|motivation|research question)\b",
+        re.IGNORECASE,
+    ),
+    "method": re.compile(
+        r"\b(method(?:ology)?|approach|algorithm|model|architecture|framework|network|proposed)\b",
+        re.IGNORECASE,
+    ),
+    "dataset": re.compile(
+        r"\b(dataset|data set|corpus|benchmark|training set|test set|validation set|participants|subjects|samples|records|ISIC|HAM10000)\b",
+        re.IGNORECASE,
+    ),
+    "metrics": re.compile(
+        r"\b(accuracy|precision|recall|F1(?:-score)?|AUC|ROC|specificity|sensitivity|BLEU|ROUGE|perplexity|RMSE|MAE|IoU)\b",
+        re.IGNORECASE,
+    ),
+    "results": re.compile(
+        r"\b(results?|findings?|achieved|performance|outperformed|improved|improvement)\b",
+        re.IGNORECASE,
+    ),
+    "limitations": re.compile(
+        r"\b(limitations?|weakness(?:es)?|constraints?|caveats?|shortcomings?|oversimplification|future work|further work)\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def _is_dimension_evidence(
+    dimension: str,
+    text: str,
+) -> bool:
+    return bool(
+        DIMENSION_EVIDENCE_PATTERNS[dimension].search(text)
+    )
 
 
 router = APIRouter(
@@ -30,36 +72,6 @@ def _error(
                 "message": message,
             }
         },
-    )
-
-
-def _get_llm():
-    from app.config import (
-        LLM_API_KEY,
-        LLM_BASE_URL,
-        LLM_MODEL,
-        LLM_PROVIDER,
-        OLLAMA_BASE_URL,
-    )
-
-    if LLM_PROVIDER == "ollama":
-        from app.llm.ollama_client import (
-            OllamaClient,
-        )
-
-        return OllamaClient(
-            base_url=OLLAMA_BASE_URL,
-            model=LLM_MODEL,
-        )
-
-    from app.llm.anthropic_client import (
-        AnthropicClient,
-    )
-
-    return AnthropicClient(
-        api_key=LLM_API_KEY,
-        model=LLM_MODEL,
-        base_url=LLM_BASE_URL,
     )
 
 
@@ -106,45 +118,49 @@ def compare_papers(
     try:
         from app.retrieval.search import search
 
-        evidence: dict[str, str] = {}
+        sources: dict[str, dict[str, list[Citation]]] = {}
 
-        dimensions = [
-            "problem",
-            "method",
-            "dataset",
-            "metrics",
-            "results",
-            "limitations",
-        ]
+        dimension_queries = {
+            "problem": (
+                "research problem, objective, challenge, or motivation addressed"
+            ),
+            "method": (
+                "proposed method, model, algorithm, or experimental approach"
+            ),
+            "dataset": (
+                "dataset, data source, sample size, or experimental data used"
+            ),
+            "metrics": (
+                "evaluation metrics and performance measures reported"
+            ),
+            "results": (
+                "quantitative experimental results and main findings"
+            ),
+            "limitations": (
+                "stated limitations, weaknesses, assumptions, and future work"
+            ),
+        }
 
         for paper in papers:
-            passages: list[str] = []
+            paper_sources: dict[str, list[Citation]] = {}
 
-            for dimension in dimensions:
-                citations = search(
-                    query=dimension,
-                    paper_ids=[paper.id],
-                )
+            for dimension, query in dimension_queries.items():
+                citations = [
+                    citation
+                    for citation in search(
+                        query=query,
+                        paper_ids=[paper.id],
+                        top_k=10,
+                    )
+                    if _is_dimension_evidence(
+                        dimension,
+                        citation.text,
+                    )
+                ][:1]
 
-                passages.extend(
-                    item.text
-                    for item in citations[:3]
-                )
+                paper_sources[dimension] = citations
 
-            evidence[paper.id] = "\n\n".join(
-                dict.fromkeys(passages)
-            )
-
-        llm = _get_llm()
-
-        from app.analysis.compare import (
-            compare_papers as run_comparison,
-        )
-
-        result = run_comparison(
-            llm,
-            evidence,
-        )
+            sources[paper.id] = paper_sources
 
         return {
             "papers": [
@@ -156,7 +172,8 @@ def compare_papers(
                 for paper in papers
             ],
             "rows": _comparison_rows(
-                result
+                [paper.id for paper in papers],
+                sources,
             ),
             "charts": [],
         }
@@ -165,6 +182,7 @@ def compare_papers(
         raise
 
     except Exception as exc:
+        logger.exception("Paper comparison failed")
         raise _error(
             502,
             "ANALYSIS_FAILED",
@@ -173,7 +191,8 @@ def compare_papers(
 
 
 def _comparison_rows(
-    result,
+    paper_ids: list[str],
+    sources: dict[str, dict[str, list[Citation]]],
 ) -> list[dict]:
     dimensions = [
         "problem",
@@ -189,21 +208,30 @@ def _comparison_rows(
     for dimension in dimensions:
         cells = []
 
-        for paper in result.papers:
-            cell = getattr(
-                paper,
-                dimension,
-            )
+        for paper_id in paper_ids:
+            available_sources = sources.get(
+                paper_id,
+                {},
+            ).get(dimension, [])
+            citations = [
+                {
+                    "paper_id": source.paper_id,
+                    "chunk_id": source.chunk_id,
+                    "page": source.page,
+                    "section": source.section,
+                }
+                for source in available_sources
+            ]
 
             cells.append(
                 {
-                    "paper_id": paper.paper_id,
-                    "value": cell.value,
-                    "citations": [
-                        citation.model_dump()
-                        for citation
-                        in cell.citations
-                    ],
+                    "paper_id": paper_id,
+                    "value": (
+                        available_sources[0].text[:320].strip()
+                        if available_sources
+                        else "Not reported in retrieved evidence."
+                    ),
+                    "citations": citations,
                 }
             )
 

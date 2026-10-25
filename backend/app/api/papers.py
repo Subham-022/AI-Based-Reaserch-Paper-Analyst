@@ -54,6 +54,10 @@ class URLRequest(BaseModel):
 class PaperSummaryResponse(BaseModel):
     paper_id: str
     summary: str
+    problem: str
+    approach: str
+    main_result: str
+    limitations: list[str] = Field(default_factory=list)
     key_points: list[str] = Field(default_factory=list)
     citations: list[dict] = Field(default_factory=list)
 
@@ -725,28 +729,22 @@ def ingest_url(
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
 ) -> dict:
-    parsed = urlparse(request.url)
-
-    if not parsed.scheme:
-        raise _error(
-            400,
-            "INVALID_URL",
-            "Enter a complete HTTPS paper URL.",
-        )
-
     _validate_url(request.url)
 
     destination = PDF_DIR / _safe_filename()
 
-    _download_pdf(request.url, destination)
-
-    paper, job = _create_paper(
-        session,
-        destination,
-        "remote-paper.pdf",
-        "url",
-        request.url,
-    )
+    try:
+        _download_pdf(request.url, destination)
+        paper, job = _create_paper(
+            session,
+            destination,
+            "remote-paper.pdf",
+            "url",
+            request.url,
+        )
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
 
     if paper.status != "ready":
         background_tasks.add_task(
@@ -847,6 +845,53 @@ def paper_status(
     }
 
 
+@router.get("/{paper_id}/source/{chunk_id}")
+def get_paper_source(
+    paper_id: str,
+    chunk_id: str,
+    session: Session = Depends(get_session),
+) -> dict:
+    paper = session.get(Paper, paper_id)
+
+    if paper is None:
+        raise _error(
+            404,
+            "PAPER_NOT_FOUND",
+            "The requested paper does not exist.",
+        )
+
+    if paper.status != "ready":
+        raise _error(
+            409,
+            "PAPER_NOT_READY",
+            "The paper has not finished processing.",
+        )
+
+    from app.retrieval.search import get_retriever
+
+    source = get_retriever().store.get_chunk(chunk_id)
+
+    if (
+        source is None
+        or source["metadata"].get("paper_id") != paper_id
+        or source["metadata"].get("chunk_id") != chunk_id
+    ):
+        raise _error(
+            404,
+            "SOURCE_NOT_FOUND",
+            "The requested source passage does not exist.",
+        )
+
+    metadata = source["metadata"]
+    return {
+        "paper_id": paper_id,
+        "chunk_id": chunk_id,
+        "page": int(metadata["page"]),
+        "section": str(metadata["section"]),
+        "text": str(source["text"]),
+    }
+
+
 @router.get(
     "/{paper_id}/summary",
     response_model=PaperSummaryResponse,
@@ -883,6 +928,10 @@ def get_summary(
     return PaperSummaryResponse(
         paper_id=paper.id,
         summary=data["summary"],
+        problem=data["problem"],
+        approach=data["approach"],
+        main_result=data["main_result"],
+        limitations=data.get("limitations", []),
         key_points=[
             data["problem"],
             data["approach"],
