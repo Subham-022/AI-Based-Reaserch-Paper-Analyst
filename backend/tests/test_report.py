@@ -1,27 +1,13 @@
 from pathlib import Path
 
-from app.analysis.compare import (
-    ComparisonResult,
-    PaperComparison,
-    ComparisonCell,
-)
-from app.analysis.extract import (
-    Evidence,
-    FindingsResult,
-    Finding,
-    LimitationsResult,
-    Limitation,
-    MethodologyResult,
-)
+import fitz
+
 from app.analysis.summarize import (
     SummaryResult,
 )
 from app.reports.builder import (
     ReportData,
     build_markdown,
-)
-from app.reports.charts import (
-    create_metric_chart,
 )
 from app.reports.pdf import (
     export_pdf,
@@ -40,37 +26,6 @@ def _report() -> ReportData:
                 "A limitation."
             ],
         ),
-        findings=FindingsResult(
-            findings=[
-                Finding(
-                    finding="Important finding.",
-                    evidence="Evidence.",
-                    page=3,
-                )
-            ]
-        ),
-        methodology=MethodologyResult(
-            method="Transformer",
-            models=["Model A"],
-            datasets=["Dataset A"],
-            metrics=["Accuracy"],
-            experimental_setup="Standard setup.",
-            evidence=[
-                Evidence(
-                    text="Evidence.",
-                    page=4,
-                )
-            ],
-        ),
-        limitations=LimitationsResult(
-            limitations=[
-                Limitation(
-                    text="Small dataset.",
-                    type="stated",
-                    page=8,
-                )
-            ]
-        ),
     )
 
 
@@ -86,50 +41,24 @@ def test_markdown_report_contains_sections() -> None:
     assert "## Limitations" in markdown
 
 
-def test_chart_uses_real_values(
-    tmp_path: Path,
-) -> None:
-    output = tmp_path / "metric.png"
-
-    result = create_metric_chart(
-        [
-            ("Paper A", 0.91),
-            ("Paper B", 0.87),
-        ],
-        output,
-        "Accuracy",
-        "Accuracy",
-    )
-
-    assert result == output
-    assert output.exists()
-    assert output.stat().st_size > 0
-
-
-def test_chart_rejects_non_numeric_values(
-    tmp_path: Path,
-) -> None:
-    output = tmp_path / "metric.png"
-
-    result = create_metric_chart(
-        [
-            ("Paper A", "unknown"),
-        ],
-        output,
-        "Accuracy",
-        "Accuracy",
-    )
-
-    assert result is None
-    assert not output.exists()
-
-
 def test_pdf_export(
     tmp_path: Path,
 ) -> None:
-    markdown = build_markdown(
-        _report()
-    )
+    markdown = """# Research—paper review
+
+## Summary
+
+This is **readable text** with a proper Unicode dash – and punctuation.
+
+- A finding with 91% accuracy
+"""
+    image_document = fitz.open()
+    image_page = image_document.new_page(width=200, height=100)
+    image_page.draw_rect(fitz.Rect(20, 20, 180, 80), color=(0, 0, 1))
+    chart = tmp_path / "figure.png"
+    chart.write_bytes(image_page.get_pixmap().tobytes("png"))
+    image_document.close()
+    markdown += f"\n![Accuracy chart]({chart})\n"
 
     output = tmp_path / "report.pdf"
 
@@ -141,6 +70,29 @@ def test_pdf_export(
     assert result == output
     assert output.exists()
     assert output.stat().st_size > 0
+    with fitz.open(output) as document:
+        text = "\n".join(page.get_text() for page in document)
+        assert "Research—paper review" in text
+        assert "readable text" in text
+        assert "A finding with 91% accuracy" in text
+        assert sum(len(page.get_images()) for page in document) > 0
+
+
+def test_pdf_export_includes_saved_analysis_details() -> None:
+    report = _report()
+    report.summary.key_findings = ["A measured finding."]
+    report.summary.datasets = ["Dataset X"]
+    report.summary.evaluation_metrics = ["F1-score"]
+    report.summary.quantitative_results = ["91% accuracy"]
+
+    markdown = build_markdown(report)
+
+    assert "- A measured finding." in markdown
+    assert "- Dataset X" in markdown
+    assert "- F1-score" in markdown
+    assert "- 91% accuracy" in markdown
+
+
 def test_pdf_export_preserves_table_and_bullets(
     tmp_path: Path,
 ) -> None:

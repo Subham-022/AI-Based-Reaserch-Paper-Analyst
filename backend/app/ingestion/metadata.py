@@ -123,6 +123,8 @@ def _find_venue(
 def extract_metadata(
     pages: list[str],
     source_url: str | None = None,
+    pdf_metadata: dict[str, str | None] | None = None,
+    fallback_title: str | None = None,
 ) -> PaperMetadata:
     first_pages = "\n".join(
         pages[:2]
@@ -134,11 +136,26 @@ def extract_metadata(
         if line.strip()
     ]
 
-    title = _find_title(lines)
+    embedded_title = ((pdf_metadata or {}).get("title") or "").strip()
+    text_title = _find_title(lines)
+    title = embedded_title or text_title or fallback_title
     authors = _find_authors(
         lines,
-        title,
+        text_title,
     )
+    if not authors:
+        embedded_authors = (
+            (pdf_metadata or {}).get("author") or ""
+        ).strip()
+        authors = [
+            author.strip()
+            for author in re.split(
+                r";|\band\b",
+                embedded_authors,
+                flags=re.IGNORECASE,
+            )
+            if author.strip()
+        ]
     venue = _find_venue(lines)
 
     doi_match = _DOI_RE.search(

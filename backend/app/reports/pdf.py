@@ -3,10 +3,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import reportlab
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     Image,
     Paragraph,
@@ -17,12 +20,32 @@ from reportlab.platypus import (
 )
 
 
-def _escape(text: str) -> str:
-    return (
+def _register_fonts() -> None:
+    if "ReportBody" in pdfmetrics.getRegisteredFontNames():
+        return
+
+    font_dir = Path(reportlab.__file__).parent / "fonts"
+    pdfmetrics.registerFont(TTFont("ReportBody", str(font_dir / "Vera.ttf")))
+    pdfmetrics.registerFont(TTFont("ReportBold", str(font_dir / "VeraBd.ttf")))
+    pdfmetrics.registerFont(TTFont("ReportItalic", str(font_dir / "VeraIt.ttf")))
+    pdfmetrics.registerFont(TTFont("ReportBoldItalic", str(font_dir / "VeraBI.ttf")))
+    pdfmetrics.registerFontFamily(
+        "ReportBody",
+        normal="ReportBody",
+        bold="ReportBold",
+        italic="ReportItalic",
+        boldItalic="ReportBoldItalic",
+    )
+
+
+def _inline_markup(text: str) -> str:
+    escaped = (
         text.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    return re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", escaped)
 
 
 def _parse_table_row(line: str) -> list[str]:
@@ -107,6 +130,8 @@ def _markdown_to_blocks(
 
 def _table_flowable(
     value: str,
+    styles,
+    available_width: float,
 ) -> Table:
     rows = [
         _parse_table_row(line)
@@ -123,13 +148,16 @@ def _table_flowable(
         [
             [
                 Paragraph(
-                    _escape(cell),
-                    getSampleStyleSheet()["BodyText"],
+                    _inline_markup(cell),
+                    styles["ReportCell"],
                 )
                 for cell in row
             ]
             for row in rows
         ],
+        colWidths=[available_width / max(len(row) for row in rows)] * max(
+            len(row) for row in rows
+        ),
         repeatRows=1,
         hAlign="LEFT",
     )
@@ -155,20 +183,41 @@ def export_pdf(
     markdown: str,
     output_path: Path,
 ) -> Path:
+    _register_fonts()
     output_path.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
     styles = getSampleStyleSheet()
+    styles["Normal"].fontName = "ReportBody"
+    styles["Normal"].leading = 15
+    styles["BodyText"].fontName = "ReportBody"
+    styles["BodyText"].leading = 15
+    styles["BodyText"].spaceAfter = 6
+    styles["Title"].fontName = "ReportBold"
+    styles["Heading1"].fontName = "ReportBold"
+    styles["Heading2"].fontName = "ReportBold"
+    styles["Heading3"].fontName = "ReportBold"
+    styles.add(
+        ParagraphStyle(
+            "ReportCell",
+            parent=styles["BodyText"],
+            fontSize=8,
+            leading=10,
+            spaceAfter=0,
+        )
+    )
 
+    page_width, _ = A4
+    margin = 42
     document = SimpleDocTemplate(
         str(output_path),
         pagesize=A4,
-        rightMargin=42,
-        leftMargin=42,
-        topMargin=42,
-        bottomMargin=42,
+        rightMargin=margin,
+        leftMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
     )
 
     story = []
@@ -177,7 +226,7 @@ def export_pdf(
         if kind == "title":
             story.append(
                 Paragraph(
-                    _escape(value),
+                    _inline_markup(value),
                     styles["Title"],
                 )
             )
@@ -186,7 +235,7 @@ def export_pdf(
         elif kind == "heading2":
             story.append(
                 Paragraph(
-                    _escape(value),
+                    _inline_markup(value),
                     styles["Heading2"],
                 )
             )
@@ -195,7 +244,7 @@ def export_pdf(
         elif kind == "heading3":
             story.append(
                 Paragraph(
-                    _escape(value),
+                    _inline_markup(value),
                     styles["Heading3"],
                 )
             )
@@ -203,32 +252,37 @@ def export_pdf(
         elif kind == "bullet":
             story.append(
                 Paragraph(
-                    "• " + _escape(value),
+                    "• " + _inline_markup(value),
                     styles["BodyText"],
                 )
             )
             story.append(Spacer(1, 4))
 
         elif kind == "table":
-            story.append(_table_flowable(value))
+            story.append(
+                _table_flowable(
+                    value,
+                    styles,
+                    page_width - 2 * margin,
+                )
+            )
             story.append(Spacer(1, 12))
 
         elif kind == "image":
             image_path = Path(value)
-
-            if image_path.exists():
-                image = Image(str(image_path))
-                image._restrictSize(
-                    170 * mm,
-                    100 * mm,
+            if not image_path.is_file():
+                raise FileNotFoundError(
+                    f"Report image does not exist: {image_path}"
                 )
-                story.append(image)
-                story.append(Spacer(1, 12))
+            image = Image(str(image_path))
+            image._restrictSize(165 * mm, 100 * mm)
+            story.append(image)
+            story.append(Spacer(1, 12))
 
         else:
             story.append(
                 Paragraph(
-                    _escape(value),
+                    _inline_markup(value),
                     styles["BodyText"],
                 )
             )

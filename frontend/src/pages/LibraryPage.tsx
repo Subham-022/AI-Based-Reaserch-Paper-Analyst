@@ -22,9 +22,13 @@ import {
   exportPaperReport,
   getChatMessages,
   getPaper,
+  getPaperAssets,
+  getPaperFigureUrl,
+  getPaperTablePreviewUrl,
   getPaperStatus,
   getPaperSummary,
   listPapers,
+  reprocessPaper,
   type Citation,
   type ChatMessage,
   type ReportFormat,
@@ -34,6 +38,23 @@ import UploadPaperModal from '../components/UploadPaperModal';
 import SourcePassageDialog from '../components/SourcePassageDialog';
 
 type Tab = 'summary' | 'details' | 'chat';
+
+function displayProcessingError(error: string | null | undefined): string | null {
+  if (!error) {
+    return null;
+  }
+
+  const normalizedError = error.toLowerCase();
+  if (
+    normalizedError.includes('api key') &&
+    (normalizedError.includes('model access') ||
+      normalizedError.includes('account limits'))
+  ) {
+    return 'This saved error is from an earlier analysis attempt. The app now uses local Ollama. Select Re-analyze PDF to retry.';
+  }
+
+  return error;
+}
 
 function readableCitationValue(citation: Citation): string {
   const preferredKeys = [
@@ -227,20 +248,6 @@ function LibraryPage() {
       .includes(searchTerm.trim().toLowerCase()),
   );
 
-  const detailsQuery = useQuery({
-    queryKey: ['paper-details', selectedPaperId],
-    queryFn: () => getPaper(selectedPaperId!),
-    enabled: Boolean(selectedPaperId) && selectedPaper?.status === 'ready',
-    retry: 1,
-  });
-
-  const summaryQuery = useQuery({
-    queryKey: ['paper-summary', selectedPaperId],
-    queryFn: () => getPaperSummary(selectedPaperId!),
-    enabled: Boolean(selectedPaperId) && selectedPaper?.status === 'ready',
-    retry: 1,
-  });
-
   const statusQuery = useQuery({
     queryKey: ['paper-status', selectedPaperId],
     queryFn: () => getPaperStatus(selectedPaperId!),
@@ -251,6 +258,41 @@ function LibraryPage() {
       return status === 'ready' || status === 'failed' ? false : 3000;
     },
   });
+
+  const currentStatus =
+    selectedPaper?.status === 'ready'
+      ? 'ready'
+      : statusQuery.data?.status ?? selectedPaper?.status ?? 'unknown';
+
+  const detailsQuery = useQuery({
+    queryKey: ['paper-details', selectedPaperId],
+    queryFn: () => getPaper(selectedPaperId!),
+    enabled: Boolean(selectedPaperId) && currentStatus === 'ready',
+    retry: 1,
+  });
+
+  const summaryQuery = useQuery({
+    queryKey: ['paper-summary', selectedPaperId],
+    queryFn: () => getPaperSummary(selectedPaperId!),
+    enabled: Boolean(selectedPaperId) && currentStatus === 'ready',
+    retry: 1,
+  });
+
+  const assetsQuery = useQuery({
+    queryKey: ['paper-assets', selectedPaperId],
+    queryFn: () => getPaperAssets(selectedPaperId!),
+    enabled: Boolean(selectedPaperId) && currentStatus === 'ready',
+    retry: 1,
+  });
+
+  useEffect(() => {
+    if (
+      statusQuery.data?.status === 'ready' ||
+      statusQuery.data?.status === 'failed'
+    ) {
+      void queryClient.invalidateQueries({ queryKey: ['papers'] });
+    }
+  }, [queryClient, statusQuery.data?.status]);
 
   const messagesQuery = useQuery({
     queryKey: ['chat-messages', chatSessionId],
@@ -296,6 +338,27 @@ function LibraryPage() {
 
     onError: (mutationError: Error) => {
       setChatError(mutationError.message);
+    },
+  });
+
+  const reprocessMutation = useMutation({
+    mutationFn: () => reprocessPaper(selectedPaperId!),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['papers'] }),
+        queryClient.invalidateQueries({
+          queryKey: ['paper-details', selectedPaperId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['paper-summary', selectedPaperId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['paper-assets', selectedPaperId],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ['paper-status', selectedPaperId],
+        }),
+      ]);
     },
   });
 
@@ -404,22 +467,35 @@ function LibraryPage() {
 
   const summary = summaryQuery.data;
   const keyPoints = cleanKeyPoints(summary?.key_points);
-  const problem = summary?.problem ?? keyPoints[0];
-  const approach = summary?.approach ?? keyPoints[1];
-  const mainResult = summary?.main_result ?? keyPoints[2];
+  const problem = isUsefulText(summary?.problem)
+    ? summary.problem
+    : keyPoints[0];
+  const approach = isUsefulText(summary?.approach)
+    ? summary.approach
+    : keyPoints[1];
+  const mainResult = isUsefulText(summary?.main_result)
+    ? summary.main_result
+    : keyPoints[2];
   const limitations = cleanKeyPoints(
     summary?.limitations ?? keyPoints.slice(3),
   );
+  const summarySections: Array<[string, string[] | undefined]> = [
+    ['Key findings', summary?.key_findings],
+    ['Methodology details', summary?.methodology_details],
+    ['Datasets', summary?.datasets],
+    ['Evaluation metrics', summary?.evaluation_metrics],
+    ['Quantitative results', summary?.quantitative_results],
+    ['Equations and calculations', summary?.equations_and_calculations],
+    [
+      'What the paper reports about its figures and tables',
+      summary?.analysis_of_visuals_and_tables,
+    ],
+  ];
 
   const messages: ChatMessage[] = messagesQuery.data?.items ?? [];
 
-  const currentStatus =
-    selectedPaper?.status === 'ready'
-      ? 'ready'
-      : statusQuery.data?.status ?? selectedPaper?.status ?? 'unknown';
-
   const processingError =
-    statusQuery.data?.error ??
+    displayProcessingError(statusQuery.data?.error) ??
     (currentStatus === 'failed' ? 'Paper processing failed.' : null);
 
   return (
@@ -622,6 +698,27 @@ function LibraryPage() {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
+                      {(currentStatus === 'ready' ||
+                        currentStatus === 'failed') && (
+                        <button
+                          type="button"
+                          onClick={() => reprocessMutation.mutate()}
+                          disabled={reprocessMutation.isPending}
+                          className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {reprocessMutation.isPending ? (
+                            <LoaderCircle
+                              size={14}
+                              className="animate-spin"
+                            />
+                          ) : (
+                            <RefreshCw size={14} />
+                          )}
+                          {reprocessMutation.isPending
+                            ? 'Starting analysis...'
+                            : 'Re-analyze PDF'}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => {
@@ -661,6 +758,13 @@ function LibraryPage() {
                       className="mt-3 text-sm text-red-700"
                     >
                       {reportError}
+                    </p>
+                  )}
+                  {reprocessMutation.isError && (
+                    <p role="alert" className="mt-3 text-sm text-red-700">
+                      {reprocessMutation.error instanceof Error
+                        ? reprocessMutation.error.message
+                        : 'The PDF could not be re-analyzed.'}
                     </p>
                   )}
                 </div>
@@ -805,6 +909,171 @@ function LibraryPage() {
                               </p>
                             )}
                           </SectionCard>
+
+                          {summarySections.map(([title, items]) => {
+                            if (!items?.length) {
+                              return null;
+                            }
+
+                            return (
+                              <SectionCard key={title} title={title}>
+                                <ul className="list-disc space-y-2 pl-5">
+                                  {items.map((item, index) => (
+                                    <li key={`${index}-${item}`}>{item}</li>
+                                  ))}
+                                </ul>
+                              </SectionCard>
+                            );
+                          })}
+
+                          {assetsQuery.isLoading && (
+                            <SectionCard title="Figures, tables, and calculations">
+                              Extracting visuals and structured data from the PDF...
+                            </SectionCard>
+                          )}
+
+                          {assetsQuery.isError && (
+                            <div className="rounded-lg border border-red-200 bg-white p-5 text-sm text-red-700">
+                              {assetsQuery.error instanceof Error
+                                ? assetsQuery.error.message
+                                : 'Figures and tables could not be loaded.'}
+                            </div>
+                          )}
+
+                          {assetsQuery.data && (
+                            <>
+                              {assetsQuery.data.figures.length > 0 && (
+                                <SectionCard title="Figures and images">
+                                  <div className="grid gap-6">
+                                    {assetsQuery.data.figures.map((figure) => (
+                                      <figure
+                                        key={`${figure.page}-${figure.xref}`}
+                                        className="rounded-md border border-slate-200 p-3"
+                                      >
+                                        <img
+                                          src={getPaperFigureUrl(
+                                            selectedPaperId!,
+                                            figure.page,
+                                            figure.xref,
+                                          )}
+                                          alt={figure.caption}
+                                          loading="lazy"
+                                          className="mx-auto max-h-[640px] max-w-full object-contain"
+                                        />
+                                        <figcaption className="mt-3 text-sm text-slate-700">
+                                          <span className="font-medium">
+                                            Page {figure.page}
+                                            {figure.xref === 0
+                                              ? ' · full-page figure preview:'
+                                              : ' · extracted image:'}
+                                          </span>{' '}
+                                          {figure.caption}
+                                        </figcaption>
+                                      </figure>
+                                    ))}
+                                  </div>
+                                </SectionCard>
+                              )}
+
+                              {assetsQuery.data.tables.length > 0 && (
+                                <SectionCard title="Extracted tables">
+                                  <div className="space-y-6">
+                                    {assetsQuery.data.tables.map((table, tableIndex) => (
+                                      <div
+                                        key={`${table.page}-${tableIndex}`}
+                                        className="overflow-x-auto"
+                                      >
+                                        {table.preview_only && (
+                                          <a
+                                            href={getPaperTablePreviewUrl(table.preview_url)}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            className="block rounded border border-slate-200 bg-slate-50 p-2"
+                                            title="Open the original table area in a new tab"
+                                          >
+                                            <img
+                                              src={getPaperTablePreviewUrl(table.preview_url)}
+                                              alt={`${table.caption}, page ${table.page}`}
+                                              loading="lazy"
+                                              className="mx-auto max-h-[640px] max-w-full object-contain"
+                                            />
+                                            <span className="mt-2 block text-xs text-slate-500">
+                                              Shown from the original PDF because
+                                              its table layout could not be
+                                              reliably converted into cells.
+                                            </span>
+                                          </a>
+                                        )}
+                                        <p className="mb-2 text-sm font-medium">
+                                          Page {table.page}: {table.caption}
+                                        </p>
+                                        {!table.preview_only && (
+                                          <table className="min-w-full border-collapse text-left text-sm">
+                                            <tbody>
+                                              {table.rows.map((row, rowIndex) => {
+                                                const Cell =
+                                                  rowIndex === 0 ? 'th' : 'td';
+                                                return (
+                                                  <tr
+                                                    key={`${tableIndex}-${rowIndex}`}
+                                                    className={
+                                                      rowIndex === 0
+                                                        ? 'bg-slate-100'
+                                                        : 'even:bg-slate-50'
+                                                    }
+                                                  >
+                                                    {row.map((cell, cellIndex) => (
+                                                      <Cell
+                                                        key={`${rowIndex}-${cellIndex}`}
+                                                        className="border border-slate-200 px-3 py-2 align-top"
+                                                      >
+                                                        {cell}
+                                                      </Cell>
+                                                    ))}
+                                                  </tr>
+                                                );
+                                              })}
+                                            </tbody>
+                                          </table>
+                                        )}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </SectionCard>
+                              )}
+
+                              {assetsQuery.data.equations.length > 0 && (
+                                <SectionCard title="Extracted equations and calculations">
+                                  <ul className="space-y-3">
+                                    {assetsQuery.data.equations.map(
+                                      (equation, index) => (
+                                        <li
+                                          key={`${equation.page}-${index}`}
+                                          className="rounded-md bg-slate-50 p-3"
+                                        >
+                                          <code className="whitespace-pre-wrap break-words text-sm">
+                                            {equation.text}
+                                          </code>
+                                          <p className="mt-2 text-xs text-slate-500">
+                                            Page {equation.page}
+                                          </p>
+                                        </li>
+                                      ),
+                                    )}
+                                  </ul>
+                                </SectionCard>
+                              )}
+
+                              {assetsQuery.data.figures.length === 0 &&
+                                assetsQuery.data.tables.length === 0 &&
+                                assetsQuery.data.equations.length === 0 && (
+                                  <SectionCard title="Figures, tables, and calculations">
+                                    No extractable figures, tables, or equations
+                                    were detected in this PDF.
+                                  </SectionCard>
+                                )}
+                            </>
+                          )}
 
                           <div className="rounded-lg border border-slate-200 bg-white p-5">
                             <div className="flex items-center gap-2">

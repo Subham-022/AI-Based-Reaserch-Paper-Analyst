@@ -10,7 +10,7 @@ The design follows the locked stack:
 - PDF parsing: PyMuPDF + pymupdf4llm
 - Embeddings: sentence-transformers
 - Vector store: ChromaDB, persistent on disk
-- LLM: one provider interface with Anthropic/OpenAI-compatible and Ollama implementations
+- LLM: local Ollama chat API
 - Reports: Markdown + ReportLab PDF
 - Charts: matplotlib, only from extracted numeric values
 - Frontend: React + Vite + TypeScript + Tailwind
@@ -43,9 +43,7 @@ flowchart LR
     RET --> VS
     RET --> DB
 
-    RET --> LLM[LLM Provider Interface]
-    LLM --> AN[Anthropic / OpenAI-compatible API]
-    LLM --> OL[Ollama]
+    RET --> LLM[Local Ollama]
 
     API --> ANA[Analysis]
     ANA --> LLM
@@ -67,7 +65,8 @@ flowchart LR
 - Ingestion runs as a FastAPI background task for the first deployment. It persists job state so the UI can safely poll after refresh.
 - ChromaDB stores embeddings and retrieval metadata; SQLite remains the source of truth for paper metadata, jobs, reports, and chat history.
 - File storage contains original uploaded PDFs and generated report/chart files.
-- The LLM provider is selected by `LLM_PROVIDER` and is the only provider abstraction in the application.
+- Analysis and chat use the local Ollama service configured by `LLM_MODEL` and
+  `OLLAMA_BASE_URL`.
 
 ## 3. Core components
 
@@ -89,9 +88,8 @@ flowchart LR
 | `retrieval/embedder.py` | Sentence-transformer embedding generation |
 | `retrieval/store.py` | Chroma collection writes/reads |
 | `retrieval/search.py` | Semantic retrieval, filtering, citation mapping |
-| `llm/base.py` | Small provider contract shared by the two real LLM implementations |
-| `llm/anthropic_client.py` | Anthropic/OpenAI-compatible remote LLM implementation |
-| `llm/ollama_client.py` | Ollama local implementation |
+| `llm/base.py` | Small provider contract shared by LLM implementations |
+| `llm/ollama_client.py` | Communicate with the configured local Ollama model |
 | `llm/prompts.py` | Task-specific grounded prompts |
 | `analysis/*` | Summary, findings, methodology, limitations, comparison, and Q&A orchestration |
 | `reports/*` | Markdown, numeric-data charts, and PDF generation |
@@ -118,11 +116,14 @@ flowchart LR
 15. Sentence-transformers generates embeddings. Existing paper/chunk hashes are reused when the same content is already indexed.
 16. Chunks and embeddings are written to ChromaDB with metadata.
 17. Paper metadata and ingestion status are updated in SQLite.
-18. A per-paper summary is generated only after ingestion succeeds and is cached in SQLite.
+18. A detailed per-paper analysis is generated from the extracted sections and available figure captions, table contents, equations, and calculations, then cached in SQLite.
 19. Job status becomes `ready`.
 20. On a boundary failure, status becomes `failed` with a safe, user-readable error.
 
 The UI polls `GET /api/papers/{paper_id}/status` until `ready` or `failed`.
+When ready, the UI loads `GET /api/papers/{paper_id}/assets` to display
+extractable figures, rendered page previews for vector figures, detected
+tables, and equations/calculations with page references.
 
 ### 4.2 Ask a question
 
@@ -804,7 +805,7 @@ This is a map-reduce flow and prevents truncating the end of long methods/result
 
 ## 16. LLM provider contract
 
-`llm/base.py` contains one small interface because two actual implementations exist.
+`llm/base.py` defines the interface used by analysis code and test doubles.
 
 Required operations:
 
@@ -814,12 +815,8 @@ generate_structured(prompt, schema)
 
 The interface returns validated structured data or a provider/validation error.
 
-Implementations:
-
-- `anthropic_client.py`: remote Anthropic/OpenAI-compatible API selected through environment configuration.
-- `ollama_client.py`: local Ollama HTTP API.
-
-The rest of the application never imports a provider-specific SDK or endpoint.
+The application uses Ollama's local `/api/chat` endpoint and structured-output
+support; no external LLM API key is required.
 
 ## 17. Prompt and structured-output rules
 
@@ -964,7 +961,6 @@ research-paper-analyst/
 │   │   │   └── search.py
 │   │   ├── llm/
 │   │   │   ├── base.py
-│   │   │   ├── anthropic_client.py
 │   │   │   ├── ollama_client.py
 │   │   │   └── prompts.py
 │   │   ├── analysis/
@@ -1015,9 +1011,7 @@ Versions are pinned so the build is reproducible.
 | `pymupdf4llm` | `0.0.17` | Layout-aware PDF text extraction |
 | `sentence-transformers` | `3.3.1` | Local free text embeddings |
 | `chromadb` | `0.6.3` | Persistent vector storage and semantic retrieval |
-| `anthropic` | `0.42.0` | Anthropic remote LLM client |
-| `openai` | `1.59.9` | OpenAI-compatible remote LLM client |
-| `httpx` | `0.28.1` | URL downloads and Ollama HTTP calls |
+| `httpx` | `0.28.1` | URL downloads and API calls |
 | `python-multipart` | `0.0.20` | FastAPI multipart PDF uploads |
 | `reportlab` | `4.2.5` | PDF report generation |
 | `matplotlib` | `3.10.0` | Source-backed numeric charts |
@@ -1060,7 +1054,7 @@ Frontend component tests are intentionally deferred to the frontend phase; their
 - PyMuPDF/pymupdf4llm is the only PDF extraction path; PyPDF2 is not used.
 - Sentence-transformers provides local embeddings; no paid embedding API is required.
 - ChromaDB persists on disk for the initial deployment.
-- Only the LLM provider has an interface because two real implementations exist.
+- The LLM contract keeps analysis independent from the Ollama HTTP client.
 - No generic repository, service, helper, manager, or utility abstraction is introduced without a concrete need.
 - SQLite remains the application database for the initial deployment.
 - Background ingestion uses FastAPI's background-task mechanism rather than adding a separate queue service.

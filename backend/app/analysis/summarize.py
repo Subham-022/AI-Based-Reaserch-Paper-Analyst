@@ -12,139 +12,87 @@ class SummaryResult(BaseModel):
     approach: str
     main_result: str
     limitations: list[str] = Field(default_factory=list)
+    key_findings: list[str] = Field(default_factory=list)
+    methodology_details: list[str] = Field(default_factory=list)
+    datasets: list[str] = Field(default_factory=list)
+    evaluation_metrics: list[str] = Field(default_factory=list)
+    quantitative_results: list[str] = Field(default_factory=list)
+    equations_and_calculations: list[str] = Field(default_factory=list)
+    analysis_of_visuals_and_tables: list[str] = Field(default_factory=list)
 
 
-class SectionSummary(BaseModel):
-    section: str
-    summary: str
+_SECTION_PRIORITY = {
+    "abstract": 0,
+    "results": 1,
+    "experiments": 2,
+    "methods": 3,
+    "methodology": 3,
+    "conclusion": 4,
+    "conclusions": 4,
+    "discussion": 5,
+    "introduction": 6,
+}
 
 
-def _split_text(text: str, max_chars: int) -> list[str]:
-    if len(text) <= max_chars:
-        return [text]
-
-    chunks: list[str] = []
-    start = 0
-
-    while start < len(text):
-        end = min(start + max_chars, len(text))
-
-        if end < len(text):
-            split_at = text.rfind(" ", start, end)
-            if split_at > start:
-                end = split_at
-
-        chunks.append(text[start:end].strip())
-        start = end
-
-    return [chunk for chunk in chunks if chunk]
-
-
-def _summarize_chunk(
-    llm: LLMProvider,
-    section: str,
-    text: str,
-) -> SectionSummary:
-    prompt = f"""
-Summarize this research paper section.
-
-Section:
-{section}
-
-Content:
-{text}
-"""
-
-    return llm.generate_json(
-        prompt,
-        SectionSummary,
-        system=SUMMARY_SYSTEM,
-    )
-
-
-def _summarize_long_section(
-    llm: LLMProvider,
-    section: str,
-    text: str,
-    max_chars: int,
-) -> SectionSummary:
-    chunks = _split_text(text, max_chars)
-
-    chunk_summaries = [
-        _summarize_chunk(llm, section, chunk)
-        for chunk in chunks
-    ]
-
-    combined = "\n\n".join(
-        item.summary for item in chunk_summaries
-    )
-
-    prompt = f"""
-Create one coherent summary of the following partial summaries
-from the "{section}" section of a research paper.
-
-Partial summaries:
-{combined}
-
-Do not add information that is not present in the partial summaries.
-"""
-
-    return llm.generate_json(
-        prompt,
-        SectionSummary,
-        system=SUMMARY_SYSTEM,
-    )
-
-
-def summarize_sections(
-    llm: LLMProvider,
+def _build_summary_context(
     sections: list[tuple[str, str]],
-    max_section_chars: int = 12000,
-) -> list[SectionSummary]:
-    results: list[SectionSummary] = []
+    max_input_chars: int,
+    max_section_chars: int,
+) -> str:
+    def base_name(name: str) -> str:
+        return name.strip().lower().split(" (page ", maxsplit=1)[0]
 
-    for name, text in sections:
-        if len(text) <= max_section_chars:
-            result = _summarize_chunk(
-                llm,
-                name,
-                text,
-            )
-        else:
-            result = _summarize_long_section(
-                llm,
-                name,
-                text,
-                max_section_chars,
-            )
+    relevant_sections = [
+        (name.strip(), text.strip())
+        for name, text in sections
+        if text.strip()
+        and base_name(name) not in {"references", "reference"}
+    ]
+    relevant_sections.sort(
+        key=lambda item: _SECTION_PRIORITY.get(
+            base_name(item[0]),
+            7,
+        )
+    )
 
-        results.append(result)
+    content: list[str] = []
+    remaining = max_input_chars
 
-    return results
+    for name, text in relevant_sections:
+        if remaining <= 0:
+            break
+
+        section_text = text[: min(max_section_chars, remaining)]
+        content.append(f"{name}:\n{section_text}")
+        remaining -= len(section_text)
+
+    return "\n\n".join(content)
 
 
 def summarize_paper(
     llm: LLMProvider,
     sections: list[tuple[str, str]],
+    max_input_chars: int = 60000,
     max_section_chars: int = 12000,
+    visual_context: str = "",
 ) -> SummaryResult:
-    section_summaries = summarize_sections(
-        llm,
+    context = _build_summary_context(
         sections,
+        max_input_chars=max_input_chars,
         max_section_chars=max_section_chars,
     )
 
-    combined = "\n\n".join(
-        f"{item.section}: {item.summary}"
-        for item in section_summaries
-    )
-
-    prompt = SUMMARY_PROMPT.format(
-        sections=combined,
-    )
+    if not context:
+        raise ValueError("No paper content is available to summarize.")
 
     return llm.generate_json(
-        prompt,
+        SUMMARY_PROMPT.format(
+            sections=context,
+            visual_context=(
+                visual_context
+                or "No tables or figure captions were extracted."
+            ),
+        ),
         SummaryResult,
         system=SUMMARY_SYSTEM,
     )

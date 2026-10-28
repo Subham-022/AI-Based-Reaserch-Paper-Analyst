@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from app.analysis.compare import (
     ComparisonResult,
-)
-from app.analysis.extract import (
-    FindingsResult,
-    LimitationsResult,
-    MethodologyResult,
 )
 from app.analysis.summarize import (
     SummaryResult,
@@ -19,13 +14,7 @@ from app.analysis.summarize import (
 class ReportData:
     title: str
     summary: SummaryResult
-    findings: FindingsResult
-    methodology: MethodologyResult
-    limitations: LimitationsResult
     comparison: ComparisonResult | None = None
-    chart_paths: list[str] = field(
-        default_factory=list
-    )
 
 
 def _bullet_lines(
@@ -66,63 +55,67 @@ def build_markdown(
         "",
     ]
 
-    for finding in report.findings.findings:
-        lines.extend(
-            [
-                (
-                    f"- **{finding.finding}** "
-                    f"(p. {finding.page}): "
-                    f"{finding.evidence}"
-                )
-            ]
-        )
+    lines.append(_bullet_lines(report.summary.key_findings))
 
     lines.extend(
         [
             "",
             "## Methodology",
             "",
-            report.methodology.method,
+            report.summary.approach,
             "",
-            "### Models",
+            "### Methodology Details",
             "",
-            _bullet_lines(
-                report.methodology.models
-            ),
+            _bullet_lines(report.summary.methodology_details),
             "",
             "### Datasets",
             "",
-            _bullet_lines(
-                report.methodology.datasets
-            ),
+            _bullet_lines(report.summary.datasets),
             "",
             "### Metrics",
             "",
-            _bullet_lines(
-                report.methodology.metrics
-            ),
-            "",
-            "### Experimental Setup",
-            "",
-            report.methodology.experimental_setup,
-            "",
-            "## Limitations",
-            "",
+            _bullet_lines(report.summary.evaluation_metrics),
         ]
     )
 
-    for limitation in report.limitations.limitations:
-        lines.append(
-            (
-                f"- {limitation.text} ({limitation.type})"
-                if limitation.page <= 0
-                else (
-                    f"- {limitation.text} "
-                    f"({limitation.type}, "
-                    f"p. {limitation.page})"
-                )
-            )
+    if report.summary.quantitative_results:
+        lines.extend(
+            [
+                "",
+                "### Quantitative Results",
+                "",
+                _bullet_lines(report.summary.quantitative_results),
+            ]
         )
+
+    if report.summary.equations_and_calculations:
+        lines.extend(
+            [
+                "",
+                "### Equations and Calculations",
+                "",
+                _bullet_lines(report.summary.equations_and_calculations),
+            ]
+        )
+
+    if report.summary.analysis_of_visuals_and_tables:
+        lines.extend(
+            [
+                "",
+                "### Analysis of Figures and Tables",
+                "",
+                _bullet_lines(report.summary.analysis_of_visuals_and_tables),
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Limitations",
+            "",
+            _bullet_lines(report.summary.limitations),
+        ]
+    )
 
     if report.comparison:
         lines.extend(
@@ -135,20 +128,6 @@ def build_markdown(
                 ),
             ]
         )
-
-    if report.chart_paths:
-        lines.extend(
-            [
-                "",
-                "## Visualizations",
-                "",
-            ]
-        )
-
-        for path in report.chart_paths:
-            lines.append(
-                f"![Visualization]({path})"
-            )
 
     return "\n".join(lines).strip() + "\n"
 

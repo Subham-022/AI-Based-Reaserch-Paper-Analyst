@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import Any
@@ -26,12 +25,7 @@ class OllamaClient(LLMProvider):
         prompt: str,
         system: str | None = None,
     ) -> str:
-        """Generate a normal text response."""
-        return self._chat(
-            prompt=prompt,
-            system=system,
-            output_format=None,
-        )
+        return self._chat(prompt, system, output_format=None)
 
     def generate_structured(
         self,
@@ -39,17 +33,7 @@ class OllamaClient(LLMProvider):
         schema: dict[str, Any],
         system: str | None = None,
     ) -> str:
-        """
-        Ask Ollama to produce JSON conforming to a JSON Schema.
-
-        Ollama supports `format: "json"` and a JSON Schema object.
-        Passing the schema object is stricter than JSON mode alone.
-        """
-        return self._chat(
-            prompt=prompt,
-            system=system,
-            output_format=schema,
-        )
+        return self._chat(prompt, system, output_format=schema)
 
     def _chat(
         self,
@@ -58,80 +42,52 @@ class OllamaClient(LLMProvider):
         output_format: str | dict[str, Any] | None,
     ) -> str:
         messages: list[dict[str, str]] = []
-
         if system:
             messages.append(
-                {
-                    "role": "system",
-                    "content": system.strip(),
-                }
+                {"role": "system", "content": system.strip()}
             )
-
-        messages.append(
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        )
+        messages.append({"role": "user", "content": prompt})
 
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": 0,
-            },
+            "options": {"temperature": 0},
         }
-
         if output_format is not None:
             payload["format"] = output_format
 
-        url = f"{self.base_url}/api/chat"
-
-        print(f"USING OLLAMA: {self.base_url} MODEL={self.model}")
-        print(f"OLLAMA REQUEST: {url}")
-        print(f"OLLAMA STRUCTURED OUTPUT: {output_format is not None}")
-
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(url, json=payload)
-
+            response = httpx.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                timeout=self.timeout,
+            )
             response.raise_for_status()
-
+            data = response.json()
         except httpx.TimeoutException as exc:
             raise LLMError(
                 f"Ollama request timed out after {self.timeout} seconds. "
-                "Check whether the model is still loading or generating."
+                "Check whether the model is loaded and try again."
             ) from exc
-
         except httpx.HTTPStatusError as exc:
-            body = exc.response.text[:2000]
             raise LLMError(
-                f"Ollama returned HTTP {exc.response.status_code}: {body}"
+                f"Ollama returned HTTP {exc.response.status_code}: "
+                f"{exc.response.text[:1000]}"
             ) from exc
-
         except httpx.RequestError as exc:
             raise LLMError(
-                f"Could not connect to Ollama at {self.base_url}: {exc}"
+                f"Could not connect to Ollama at {self.base_url}. "
+                "Start Ollama and try again."
+            ) from exc
+        except ValueError as exc:
+            raise LLMError(
+                "Ollama returned an invalid HTTP JSON response."
             ) from exc
 
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise LLMError("Ollama returned an invalid HTTP JSON response.") from exc
-
         message = data.get("message")
-
-        if not isinstance(message, dict):
-            raise LLMError(
-                f"Ollama response is missing its message object: {data}"
-            )
-
-        content = message.get("content")
-
+        content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
-            raise LLMError(
-                f"Ollama returned an empty response. Details: {data}"
-            )
+            raise LLMError("Ollama returned an empty response.")
 
         return content.strip()
