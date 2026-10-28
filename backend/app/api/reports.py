@@ -16,7 +16,13 @@ from sqlmodel import Session, select
 
 from app.config import REPORT_DIR
 from app.db import get_session
+from app.ingestion.loader import load_file
 from app.models import Paper, Report
+from app.ingestion.parser import (
+    extract_figure_image,
+    extract_table_preview,
+    parse_pdf,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,88 @@ def _error(
                 "message": message,
             }
         },
+    )
+
+
+def _append_pdf_assets(
+    markdown: str,
+    papers: list[Paper],
+    report_id: str,
+    generated_paths: list[Path],
+) -> str:
+    sections: list[str] = []
+
+    for paper_index, paper in enumerate(papers):
+        pdf_data = load_file(Path(paper.storage_path))
+        parsed = parse_pdf(pdf_data)
+        if not parsed.figures and not parsed.tables:
+            continue
+
+        title = paper.title or Path(paper.original_filename).stem
+        if len(papers) > 1:
+            sections.extend(["### " + title, ""])
+
+        for figure_index, figure in enumerate(parsed.figures):
+            image_data, media_type = extract_figure_image(
+                pdf_data,
+                figure.page,
+                figure.xref,
+            )
+            extension = {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+            }.get(media_type)
+            if extension is None:
+                import fitz
+
+                image_data = fitz.Pixmap(image_data).tobytes("png")
+                extension = ".png"
+
+            image_path = REPORT_DIR / (
+                f"{report_id}-paper-{paper_index}-figure-{figure_index}{extension}"
+            )
+            generated_paths.append(image_path)
+            image_path.write_bytes(image_data)
+            sections.extend(
+                [
+                    f"#### Figure, page {figure.page}: {figure.caption}",
+                    "",
+                    f"![{figure.caption}]({image_path})",
+                    "",
+                ]
+            )
+
+        for table_index, table in enumerate(parsed.tables):
+            image_data = extract_table_preview(
+                pdf_data,
+                table.page,
+                sum(
+                    1
+                    for previous in parsed.tables[:table_index]
+                    if previous.page == table.page
+                ),
+            )
+            image_path = REPORT_DIR / (
+                f"{report_id}-paper-{paper_index}-table-{table_index}.png"
+            )
+            generated_paths.append(image_path)
+            image_path.write_bytes(image_data)
+            sections.extend(
+                [
+                    f"#### Table, page {table.page}: {table.caption}",
+                    "",
+                    f"![{table.caption}]({image_path})",
+                    "",
+                ]
+            )
+
+    if not sections:
+        return markdown
+
+    return (
+        markdown.rstrip()
+        + "\n\n## Figures and Tables\n\n"
+        + "\n".join(sections)
     )
 
 
@@ -99,14 +187,6 @@ def create_report(
     generated_paths: list[Path] = []
 
     try:
-        from app.analysis.extract import (
-            Evidence,
-            Finding,
-            FindingsResult,
-            Limitation,
-            LimitationsResult,
-            MethodologyResult,
-        )
         from app.analysis.compare import (
             ComparisonCell,
             ComparisonResult,
@@ -130,53 +210,6 @@ def create_report(
 
         summary = SummaryResult.model_validate_json(
             primary.summary_json
-        )
-
-        from app.retrieval.search import search
-
-        citations = search(
-            query="important findings methodology limitations",
-            paper_ids=[
-                paper.id
-                for paper in papers
-            ],
-            top_k=5,
-        )
-
-        findings = FindingsResult(
-            findings=[
-                Finding(
-                    finding="Retrieved evidence",
-                    evidence=citation.text,
-                    page=citation.page,
-                )
-                for citation in citations
-            ]
-        )
-
-        methodology = MethodologyResult(
-            method=summary.approach,
-            experimental_setup=(
-                "See the page-cited retrieved evidence above."
-            ),
-            evidence=[
-                Evidence(
-                    text=citation.text,
-                    page=citation.page,
-                )
-                for citation in citations
-            ],
-        )
-
-        limitations = LimitationsResult(
-            limitations=[
-                Limitation(
-                    text=limitation,
-                    type="from saved paper analysis",
-                    page=0,
-                )
-                for limitation in summary.limitations
-            ]
         )
 
         comparison = None
@@ -260,9 +293,6 @@ def create_report(
                 )
             ),
             summary=summary,
-            findings=findings,
-            methodology=methodology,
-            limitations=limitations,
             comparison=comparison,
         )
 
@@ -292,6 +322,12 @@ def create_report(
                 export_pdf,
             )
 
+            markdown = _append_pdf_assets(
+                markdown,
+                papers,
+                report_id,
+                generated_paths,
+            )
             pdf_path = (
                 REPORT_DIR
                 / f"{report_id}.pdf"
@@ -304,6 +340,15 @@ def create_report(
                 markdown,
                 pdf_path,
             )
+            for path in generated_paths:
+                if path not in {markdown_path, pdf_path}:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.exception(
+                            "Failed to remove report image %s",
+                            path,
+                        )
 
             final_path = pdf_path
 

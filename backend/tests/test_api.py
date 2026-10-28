@@ -4,6 +4,7 @@ import io
 import json
 from types import SimpleNamespace
 
+import fitz
 import pytest
 from fastapi import BackgroundTasks
 from fastapi.testclient import TestClient
@@ -84,6 +85,9 @@ def test_paper_summary_returns_structured_analysis() -> None:
         "approach": "The proposed approach.",
         "main_result": "The main result.",
         "limitations": ["A stated limitation."],
+        "key_findings": ["A detailed finding."],
+        "datasets": ["Dataset One, 2,000 samples."],
+        "quantitative_results": ["Accuracy: 94%."],
     }
 
     with Session(engine) as session:
@@ -109,6 +113,128 @@ def test_paper_summary_returns_structured_analysis() -> None:
     assert response.json()["approach"] == "The proposed approach."
     assert response.json()["main_result"] == "The main result."
     assert response.json()["limitations"] == ["A stated limitation."]
+    assert response.json()["key_findings"] == ["A detailed finding."]
+    assert response.json()["datasets"] == ["Dataset One, 2,000 samples."]
+    assert response.json()["quantitative_results"] == ["Accuracy: 94%."]
+
+
+def test_paper_assets_include_figure_and_page_image(tmp_path) -> None:
+    paper_id = "assets-paper"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text(
+        (72, 72),
+        "This research paper has enough text to pass extraction checks.",
+    )
+    page.insert_text(
+        (72, 92),
+        "Figure 1: Example vector graph",
+    )
+    page.insert_text(
+        (72, 112),
+        "The area under the curve was AUC = 0.94.",
+    )
+    page.insert_text(
+        (72, 142),
+        "Table 1: Model performance",
+    )
+    xs = [72, 180, 280]
+    ys = [160, 190, 220]
+    for x in xs:
+        page.draw_line((x, ys[0]), (x, ys[-1]))
+    for y in ys:
+        page.draw_line((xs[0], y), (xs[-1], y))
+    page.insert_text((80, 180), "Model A")
+    page.insert_text((190, 180), "----")
+    page.insert_text((80, 210), "Model B")
+    page.insert_text((190, 210), "89%")
+    page.draw_line((330, 110), (500, 200), color=(0, 0, 1), width=2)
+    pdf_path = tmp_path / "assets.pdf"
+    pdf_path.write_bytes(document.tobytes())
+    document.close()
+
+    with Session(engine) as session:
+        session.add(
+            Paper(
+                id=paper_id,
+                file_hash=f"{paper_id}-hash",
+                original_filename="assets.pdf",
+                source_type="upload",
+                storage_path=str(pdf_path),
+                status="ready",
+            )
+        )
+        session.commit()
+
+    assets_response = client.get(f"/api/papers/{paper_id}/assets")
+    assert assets_response.status_code == 200
+    assets = assets_response.json()
+    assert assets["figures"][0]["caption"] == (
+        "Figure 1 Example vector graph"
+    )
+    assert assets["equations"][0]["text"].endswith("AUC = 0.94.")
+    assert assets["figures"][0]["image_url"].endswith("/1/0")
+    assert assets["tables"][0]["caption"] == (
+        "Table 1 Model performance"
+    )
+    assert assets["tables"][0]["rows"] == [
+        ["Model A", ""],
+        ["Model B", "89%"],
+    ]
+    assert assets["tables"][0]["preview_only"] is False
+
+    table_preview = client.get(
+        f"/api/papers/{paper_id}/tables/1/0/preview"
+    )
+    assert table_preview.status_code == 200
+    assert table_preview.headers["content-type"] == "image/png"
+    assert table_preview.content.startswith(b"\x89PNG")
+
+    image_response = client.get(
+        f"/api/papers/{paper_id}/figures/1/0"
+    )
+    assert image_response.status_code == 200
+    assert image_response.headers["content-type"] == "image/png"
+    assert image_response.content.startswith(b"\x89PNG")
+
+
+def test_reprocess_paper_queues_existing_pdf(tmp_path, monkeypatch) -> None:
+    paper_id = "reprocess-paper"
+    pdf_path = tmp_path / "paper.pdf"
+    pdf_path.write_bytes(b"%PDF-")
+    scheduled: list[tuple[str, str]] = []
+
+    with Session(engine) as session:
+        session.add(
+            Paper(
+                id=paper_id,
+                file_hash=f"{paper_id}-hash",
+                original_filename="paper.pdf",
+                source_type="upload",
+                storage_path=str(pdf_path),
+                status="ready",
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr(
+        papers_api,
+        "_run_ingestion",
+        lambda requested_paper_id, job_id: scheduled.append(
+            (requested_paper_id, job_id)
+        ),
+    )
+
+    response = client.post(
+        f"/api/papers/{paper_id}/reprocess"
+    )
+
+    assert response.status_code == 202
+    assert response.json()["paper_id"] == paper_id
+    assert response.json()["status"] == "queued"
+    assert scheduled == [
+        (paper_id, response.json()["job_id"])
+    ]
 
 
 def test_paper_source_returns_only_the_requested_papers_chunk(
@@ -492,20 +618,6 @@ def test_report_route_creates_and_downloads_markdown(
         "REPORT_DIR",
         tmp_path,
     )
-    monkeypatch.setattr(
-        retrieval_search,
-        "search",
-        lambda **kwargs: [
-            Citation(
-                paper_id=paper_id,
-                chunk_id="report-chunk",
-                section="results",
-                page=3,
-                text="Retrieved report evidence.",
-                score=0.9,
-            )
-        ],
-    )
 
     response = client.post(
         "/api/reports",
@@ -525,8 +637,8 @@ def test_report_route_creates_and_downloads_markdown(
     assert download.status_code == 200
     assert "# report-paper" in download.text
     assert "## Executive Summary" in download.text
-    assert "Retrieved report evidence." in download.text
-    assert "- Limitation text. (from saved paper analysis)" in download.text
+    assert "Retrieved report evidence." not in download.text
+    assert "- Limitation text." in download.text
 
 
 def test_pdf_report_failure_removes_partial_files_and_database_record(
@@ -543,13 +655,20 @@ def test_pdf_report_failure_removes_partial_files_and_database_record(
     )
 
     with Session(engine) as session:
+        source_pdf = fitz.open()
+        source_pdf.new_page()
+        source_path = tmp_path / "source.pdf"
+        source_pdf.save(source_path)
+        source_pdf.close()
+        report_dir = tmp_path / "reports"
+        report_dir.mkdir()
         session.add(
             Paper(
                 id=paper_id,
                 file_hash=f"{paper_id}-hash",
                 original_filename="failed-report.pdf",
                 source_type="upload",
-                storage_path="failed-report.pdf",
+                storage_path=str(source_path),
                 status="ready",
                 summary_json=summary.model_dump_json(),
             )
@@ -559,14 +678,8 @@ def test_pdf_report_failure_removes_partial_files_and_database_record(
     monkeypatch.setattr(
         reports_api,
         "REPORT_DIR",
-        tmp_path,
+        report_dir,
     )
-    monkeypatch.setattr(
-        retrieval_search,
-        "search",
-        lambda **kwargs: [],
-    )
-
     def fail_after_writing(markdown, path):
         path.write_bytes(b"%PDF-partial")
         raise OSError("PDF renderer failed")
@@ -586,7 +699,58 @@ def test_pdf_report_failure_removes_partial_files_and_database_record(
 
     assert response.status_code == 502
     assert response.json()["detail"]["error"]["code"] == "REPORT_FAILED"
-    assert list(tmp_path.iterdir()) == []
+    assert list(report_dir.iterdir()) == []
+
+
+def test_pdf_report_embeds_extracted_figures(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source_pdf = fitz.open()
+    page = source_pdf.new_page()
+    page.insert_text((50, 50), "Figure 1: sample visual")
+    page.insert_textbox(
+        fitz.Rect(50, 400, 500, 550),
+        "The paper describes its figure in detail. "
+        "This test document includes enough searchable text to meet "
+        "the parser's normal minimum-content requirement.",
+    )
+    page.draw_rect(fitz.Rect(50, 80, 320, 350))
+    for offset in range(4):
+        page.draw_line(
+            fitz.Point(70, 100 + offset * 20),
+            fitz.Point(300, 100 + offset * 20),
+        )
+    pdf_path = tmp_path / "source.pdf"
+    source_pdf.save(pdf_path)
+    source_pdf.close()
+    report_dir = tmp_path / "reports"
+    report_dir.mkdir()
+    monkeypatch.setattr(reports_api, "REPORT_DIR", report_dir)
+    paper = Paper(
+        id="visual-report-paper",
+        file_hash="visual-report-hash",
+        original_filename="visual-paper.pdf",
+        source_type="upload",
+        storage_path=str(pdf_path),
+        status="ready",
+    )
+    generated_paths = []
+
+    markdown = reports_api._append_pdf_assets(
+        "# Visual report",
+        [paper],
+        "visual-report",
+        generated_paths,
+    )
+    output = report_dir / "visual-report.pdf"
+    from app.reports.pdf import export_pdf
+
+    export_pdf(markdown, output)
+
+    assert "Figure, page 1: Figure 1 sample visual" in markdown
+    with fitz.open(output) as document:
+        assert sum(len(page.get_images()) for page in document) > 0
 
 
 def test_multi_paper_report_includes_comparison_table(

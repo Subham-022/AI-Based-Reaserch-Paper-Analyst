@@ -1,15 +1,7 @@
-from app.analysis.extract import (
-    FindingsResult,
-)
-from app.analysis.compare import (
-    ComparisonResult,
-    compare_papers,
-)
 from app.analysis.qa import (
     answer_question,
 )
 from app.analysis.summarize import (
-    SectionSummary,
     SummaryResult,
 )
 from app.retrieval.search import Citation
@@ -27,12 +19,6 @@ class FakeLLM:
     ):
         self.calls += 1
 
-        if schema is SectionSummary:
-            return SectionSummary(
-                section="abstract",
-                summary="A section summary.",
-            )
-
         if schema is SummaryResult:
             return SummaryResult(
                 summary="A research summary.",
@@ -42,11 +28,6 @@ class FakeLLM:
                 limitations=[
                     "Small dataset."
                 ],
-            )
-
-        if schema is FindingsResult:
-            return FindingsResult(
-                findings=[]
             )
 
         raise AssertionError(
@@ -75,42 +56,41 @@ def test_summary_uses_llm() -> None:
         "A research summary."
     )
 
-    assert llm.calls == 2
+    assert llm.calls == 1
 
 
-def test_comparison_includes_paper_evidence_and_grounding_instructions() -> None:
-    expected = ComparisonResult(papers=[])
-    captured = {}
+def test_summary_omits_references_from_generated_analysis() -> None:
+    class PromptCapturingLLM(FakeLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: list[str] = []
 
-    class ComparisonLLM:
         def generate_json(
             self,
             prompt: str,
             schema,
             system: str | None = None,
         ):
-            captured["prompt"] = prompt
-            captured["schema"] = schema
-            captured["system"] = system
-            return expected
+            self.prompts.append(prompt)
+            return super().generate_json(prompt, schema, system)
 
-    result = compare_papers(
-        ComparisonLLM(),
-        {
-            "paper-1": "Paper one evidence.",
-            "paper-2": "Paper two evidence.",
-        },
+    llm = PromptCapturingLLM()
+
+    from app.analysis.summarize import summarize_paper
+
+    summarize_paper(
+        llm,
+        [
+            ("abstract (page 1)", "The study evaluates a specific method."),
+            ("references (page 2)", "A long list of cited papers."),
+        ],
     )
 
-    assert result is expected
-    assert captured["schema"] is ComparisonResult
-    assert "===== PAPER paper-1 =====" in captured["prompt"]
-    assert "Paper one evidence." in captured["prompt"]
-    assert "===== PAPER paper-2 =====" in captured["prompt"]
-    assert "Paper two evidence." in captured["prompt"]
-    assert "{evidence}" not in captured["prompt"]
-    assert "only using the supplied evidence" in captured["system"]
-    assert "Do not invent missing information." in captured["system"]
+    assert len(llm.prompts) == 1
+    assert "A long list of cited papers." not in llm.prompts[0]
+    assert "8-12 informative" in llm.prompts[0]
+    assert "The study evaluates a specific method." in llm.prompts[0]
+    assert "abstract (page 1)" in llm.prompts[0]
 
 
 def test_question_without_evidence_returns_not_found() -> None:
@@ -386,8 +366,22 @@ def test_question_falls_back_to_evidence_when_llm_fails() -> None:
 
 
 
-def test_long_section_is_summarized_without_truncation() -> None:
-    llm = FakeLLM()
+def test_summary_bounds_input_and_uses_one_llm_request() -> None:
+    class PromptCapturingLLM(FakeLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompt = ""
+
+        def generate_json(
+            self,
+            prompt: str,
+            schema,
+            system: str | None = None,
+        ):
+            self.prompt = prompt
+            return super().generate_json(prompt, schema, system)
+
+    llm = PromptCapturingLLM()
 
     from app.analysis.summarize import summarize_paper
 
@@ -401,8 +395,42 @@ def test_long_section_is_summarized_without_truncation() -> None:
                 long_text,
             )
         ],
+        max_input_chars=1000,
         max_section_chars=1000,
     )
 
     assert result.summary == "A research summary."
-    assert llm.calls > 2
+    assert llm.calls == 1
+    assert "Research content." in llm.prompt
+    assert len(llm.prompt) < 4000
+
+
+def test_summary_includes_visual_context_and_detailed_output_requirements() -> None:
+    class PromptCapturingLLM(FakeLLM):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompt = ""
+
+        def generate_json(
+            self,
+            prompt: str,
+            schema,
+            system: str | None = None,
+        ):
+            self.prompt = prompt
+            return super().generate_json(prompt, schema, system)
+
+    llm = PromptCapturingLLM()
+
+    from app.analysis.summarize import summarize_paper
+
+    summarize_paper(
+        llm,
+        [("results", "The model achieved 94% accuracy.")],
+        visual_context="Table 1, page 4: accuracy | 94%",
+    )
+
+    assert "94% accuracy" in llm.prompt
+    assert "Table 1, page 4" in llm.prompt
+    assert "key_findings" in llm.prompt
+    assert "quantitative_results" in llm.prompt

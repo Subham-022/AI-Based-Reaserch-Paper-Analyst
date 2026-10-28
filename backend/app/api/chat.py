@@ -10,6 +10,8 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.config import (
+    LLM_MODEL,
+    OLLAMA_BASE_URL,
     RETRIEVAL_MIN_SCORE,
 )
 from app.db import get_session
@@ -53,49 +55,6 @@ def _error(
                 "message": message,
             }
         },
-    )
-
-
-def _get_llm():
-    from app.config import (
-        LLM_API_KEY,
-        LLM_BASE_URL,
-        LLM_MODEL,
-        LLM_PROVIDER,
-        OLLAMA_BASE_URL,
-    )
-
-    if LLM_PROVIDER == "ollama":
-        from app.llm.ollama_client import OllamaClient
-
-        return OllamaClient(
-            base_url=OLLAMA_BASE_URL,
-            model=LLM_MODEL,
-            timeout=15.0,
-        )
-
-    if LLM_PROVIDER == "anthropic":
-        from app.llm.anthropic_client import AnthropicClient
-
-        return AnthropicClient(
-            api_key=LLM_API_KEY,
-            model=LLM_MODEL,
-            base_url=LLM_BASE_URL,
-        )
-
-    if LLM_PROVIDER == "openai-compatible":
-        from app.llm.openai_client import (
-            OpenAICompatibleClient,
-        )
-
-        return OpenAICompatibleClient(
-            api_key=LLM_API_KEY,
-            model=LLM_MODEL,
-            base_url=LLM_BASE_URL,
-        )
-
-    raise RuntimeError(
-        f"Unsupported LLM provider: {LLM_PROVIDER}"
     )
 
 
@@ -317,7 +276,12 @@ def ask_question(
             )
 
         stage = "LLM initialization"
-        llm = _get_llm()
+        from app.llm.ollama_client import OllamaClient
+
+        llm = OllamaClient(
+            base_url=OLLAMA_BASE_URL,
+            model=LLM_MODEL,
+        )
 
         stage = "answer generation"
 

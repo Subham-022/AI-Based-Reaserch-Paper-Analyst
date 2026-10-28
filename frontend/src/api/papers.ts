@@ -35,8 +35,42 @@ export interface PaperSummary {
   approach?: string;
   main_result?: string;
   limitations?: string[];
+  key_findings?: string[];
+  methodology_details?: string[];
+  datasets?: string[];
+  evaluation_metrics?: string[];
+  quantitative_results?: string[];
+  equations_and_calculations?: string[];
+  analysis_of_visuals_and_tables?: string[];
   key_points: string[];
   citations: Citation[];
+}
+
+export interface PaperFigure {
+  page: number;
+  xref: number;
+  caption: string;
+  image_url: string;
+}
+
+export interface PaperTable {
+  page: number;
+  caption: string;
+  rows: string[][];
+  preview_only: boolean;
+  preview_url: string;
+}
+
+export interface PaperEquation {
+  page: number;
+  text: string;
+}
+
+export interface PaperAssets {
+  paper_id: string;
+  figures: PaperFigure[];
+  tables: PaperTable[];
+  equations: PaperEquation[];
 }
 
 export interface Citation {
@@ -106,7 +140,6 @@ export interface ComparisonRow {
 export interface PaperComparisonResponse {
   papers: Array<{ id: string; title: string }>;
   rows: ComparisonRow[];
-  charts: string[];
 }
 
 async function getErrorMessage(
@@ -197,6 +230,18 @@ export async function uploadPaperFromUrl(
   );
 }
 
+export async function reprocessPaper(
+  paperId: string,
+): Promise<UploadPaperResponse> {
+  return request<UploadPaperResponse>(
+    `/papers/${encodeURIComponent(paperId)}/reprocess`,
+    {
+      method: 'POST',
+    },
+    'The paper could not be re-analyzed.',
+  );
+}
+
 export async function listPapers(): Promise<PaperListResponse> {
   return request<PaperListResponse>(
     '/papers',
@@ -223,6 +268,28 @@ export async function getPaperSummary(
     undefined,
     'The paper summary could not be loaded.',
   );
+}
+
+export async function getPaperAssets(
+  paperId: string,
+): Promise<PaperAssets> {
+  return request<PaperAssets>(
+    `/papers/${encodeURIComponent(paperId)}/assets`,
+    undefined,
+    'Figures, tables, and calculations could not be loaded.',
+  );
+}
+
+export function getPaperFigureUrl(
+  paperId: string,
+  page: number,
+  xref: number,
+): string {
+  return `${API_BASE_URL}/papers/${encodeURIComponent(paperId)}/figures/${page}/${xref}`;
+}
+
+export function getPaperTablePreviewUrl(previewUrl: string): string {
+  return new URL(previewUrl, API_BASE_URL).toString();
 }
 
 export async function getPaperSource(

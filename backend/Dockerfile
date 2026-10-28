@@ -21,7 +21,6 @@ COPY app ./app
 RUN mkdir -p \
     /app/data/storage/papers \
     /app/data/storage/reports \
-    /app/data/storage/charts \
     /app/data/chroma
 
 EXPOSE 8000

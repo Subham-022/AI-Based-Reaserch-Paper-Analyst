@@ -4,8 +4,10 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+load_dotenv(BASE_DIR.parent / ".env")
 
 
 DATA_DIR = Path(
@@ -18,7 +20,6 @@ DATA_DIR = Path(
 STORAGE_DIR = DATA_DIR / "storage"
 PDF_DIR = STORAGE_DIR / "papers"
 REPORT_DIR = STORAGE_DIR / "reports"
-CHART_DIR = STORAGE_DIR / "charts"
 CHROMA_DIR = DATA_DIR / "chroma"
 
 
@@ -28,28 +29,7 @@ DATABASE_URL = os.getenv(
 )
 
 
-# Language model configuration
-LLM_PROVIDER = os.getenv(
-    "LLM_PROVIDER",
-    "ollama",
-).lower()
-
-LLM_MODEL = os.getenv(
-    "LLM_MODEL",
-    "llama3.2:3b",
-)
-
-LLM_API_KEY = os.getenv(
-    "LLM_API_KEY"
-)
-
-LLM_BASE_URL = os.getenv(
-    "LLM_BASE_URL",
-    "https://api.anthropic.com",
-)
-
-
-# Ollama local model server
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3.2:3b")
 OLLAMA_BASE_URL = os.getenv(
     "OLLAMA_BASE_URL",
     "http://127.0.0.1:11434",
@@ -152,7 +132,6 @@ for directory in (
     STORAGE_DIR,
     PDF_DIR,
     REPORT_DIR,
-    CHART_DIR,
     CHROMA_DIR,
 ):
     directory.mkdir(

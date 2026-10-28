@@ -175,7 +175,6 @@ def compare_papers(
                 [paper.id for paper in papers],
                 sources,
             ),
-            "charts": [],
         }
 
     except HTTPException:

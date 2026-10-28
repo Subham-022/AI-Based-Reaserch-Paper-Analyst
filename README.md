@@ -8,12 +8,13 @@ PDF reports.
 
 - Python 3.11
 - Node.js 20.19+ or 22.12+
-- Ollama for the default local language model (`llama3.2:3b`)
+- [Ollama](https://ollama.com/) with the configured model available locally
 
-The first PDF ingestion or chat request may take longer while the embedding
-model is downloaded and initialized. If Ollama is unavailable or times out,
-Chat returns retrieved source passages with page citations instead of an
-unsupported generated answer.
+The first PDF ingestion may take longer while the embedding model is downloaded
+and initialized. Research-paper analysis and chat use the local Ollama model.
+The analysis includes a detailed findings-oriented summary and extracts
+detectable PDF figures, tables, equations, and numerical calculations for
+display in the paper workspace.
 
 ## Run locally on Windows
 
@@ -28,18 +29,16 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
 
-Ensure the default model is downloaded:
+Set up the Ollama model before starting the backend:
 
 ```powershell
 ollama pull llama3.2:3b
+Copy-Item .env.example .env
 ```
 
-Ollama usually runs as a background app on Windows. If it is not running,
-start it in a separate terminal and leave that terminal open:
-
-```powershell
-ollama serve
-```
+Make sure Ollama is running. The Ollama desktop app normally starts it
+automatically; otherwise run `ollama serve` in a separate terminal. The `.env`
+file is ignored by Git and can be used to change the model or Ollama URL.
 
 Start FastAPI:
 
@@ -69,16 +68,19 @@ a strict, fixed port so it cannot silently switch to another URL.
 Defaults are defined in `backend/app/config.py` and can be overridden with
 environment variables:
 
-- `LLM_PROVIDER`: `ollama` (default), `anthropic`, or `openai-compatible`
-- `LLM_MODEL`: defaults to `llama3.2:3b`
+- `LLM_MODEL`: defaults to `llama3.2:3b`; must be pulled with `ollama pull`
 - `OLLAMA_BASE_URL`: defaults to `http://127.0.0.1:11434`
-- `LLM_API_KEY` and `LLM_BASE_URL`: for remote LLM providers
 - `DATA_DIR`: SQLite database, uploaded PDFs, reports, and Chroma index
 - `CORS_ORIGINS`: comma-separated browser origins when using a custom frontend
   URL
 
 Do not commit API keys or other secrets. Local research data is stored under
 `backend/data` by default and is ignored by Git.
+
+Existing papers can be processed again with **Re-analyze PDF** after fixing
+configuration or correcting a failed analysis. Re-analyze papers already in
+the library once to generate the expanded findings and refresh their extracted
+figures, tables, and calculations.
 
 ## Validate changes
 
@@ -92,7 +94,9 @@ npm run build
 npm run lint
 ```
 
-Reports and comparisons use retrieved passages and page citations. Multi-paper
-reports include a comparison table, and chat/comparison citations open their
-exact stored passage with its page and section. Chat validates model answers
-against retrieval and falls back to relevant excerpts when generation fails.
+Comparisons use retrieved passages and page citations. PDF reports include the
+saved analysis details and embed extracted figures and table previews. Multi-
+paper reports include a comparison table, and chat/comparison citations open
+their exact stored passage with its page and section. Chat validates model
+answers against retrieval and falls back to relevant excerpts when generation
+fails.

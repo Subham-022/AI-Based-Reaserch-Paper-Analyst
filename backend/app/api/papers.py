@@ -17,6 +17,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
@@ -24,10 +25,7 @@ from app.config import (
     ALLOWED_URL_HOSTS,
     CHROMA_DIR,
     EMBEDDING_MODEL,
-    LLM_API_KEY,
-    LLM_BASE_URL,
     LLM_MODEL,
-    LLM_PROVIDER,
     MAX_DOWNLOAD_BYTES,
     MAX_UPLOAD_BYTES,
     OLLAMA_BASE_URL,
@@ -58,6 +56,13 @@ class PaperSummaryResponse(BaseModel):
     approach: str
     main_result: str
     limitations: list[str] = Field(default_factory=list)
+    key_findings: list[str] = Field(default_factory=list)
+    methodology_details: list[str] = Field(default_factory=list)
+    datasets: list[str] = Field(default_factory=list)
+    evaluation_metrics: list[str] = Field(default_factory=list)
+    quantitative_results: list[str] = Field(default_factory=list)
+    equations_and_calculations: list[str] = Field(default_factory=list)
+    analysis_of_visuals_and_tables: list[str] = Field(default_factory=list)
     key_points: list[str] = Field(default_factory=list)
     citations: list[dict] = Field(default_factory=list)
 
@@ -95,6 +100,26 @@ def _hash_file(path: Path) -> str:
 def _validate_pdf_header(path: Path) -> bool:
     with path.open("rb") as file:
         return file.read(5) == b"%PDF-"
+
+
+def _build_visual_context(parsed) -> str:
+    parts: list[str] = []
+    for figure in parsed.figures:
+        parts.append(
+            f"Figure caption, page {figure.page}: {figure.caption}"
+        )
+    for table in parsed.tables:
+        rows = "\n".join(
+            " | ".join(row) for row in table.rows
+        )
+        parts.append(
+            f"Table, page {table.page}, {table.caption}:\n{rows}"
+        )
+    for equation in parsed.equations:
+        parts.append(
+            f"Calculation or equation, page {equation.page}: {equation.text}"
+        )
+    return "\n\n".join(parts)[:20000]
 
 
 def _parse_url(url: str):
@@ -413,6 +438,8 @@ def _run_ingestion(
                 return
 
             pdf_path = Path(paper.storage_path)
+            source_url = paper.source_url
+            original_filename = paper.original_filename
 
         from app.ingestion.loader import load_file
         from app.ingestion.parser import parse_pdf
@@ -454,8 +481,6 @@ def _run_ingestion(
                 "after cleaning. OCR is required."
             )
 
-        cleaned_text = "\n\n".join(cleaned_pages)
-
         _set_job(
             paper_id,
             job_id,
@@ -491,7 +516,12 @@ def _run_ingestion(
 
         from app.ingestion.metadata import extract_metadata
 
-        metadata = extract_metadata(cleaned_text)
+        metadata = extract_metadata(
+            cleaned_pages,
+            source_url=source_url,
+            pdf_metadata=parsed.metadata,
+            fallback_title=Path(original_filename).stem,
+        )
 
         _set_job(
             paper_id,
@@ -540,61 +570,34 @@ def _run_ingestion(
 
         print("SUMMARY STAGE START")
 
-        from app.llm.base import LLMError
         from app.llm.ollama_client import OllamaClient
 
-        if LLM_PROVIDER == "ollama":
-            print(
-                f"USING OLLAMA: {OLLAMA_BASE_URL} "
-                f"MODEL={LLM_MODEL}"
-            )
-
-            llm = OllamaClient(
-                base_url=OLLAMA_BASE_URL,
-                model=LLM_MODEL,
-            )
-
-        elif LLM_PROVIDER == "anthropic":
-            print(f"USING ANTHROPIC: MODEL={LLM_MODEL}")
-
-            from app.llm.anthropic_client import AnthropicClient
-
-            llm = AnthropicClient(
-                api_key=LLM_API_KEY,
-                model=LLM_MODEL,
-                base_url=LLM_BASE_URL,
-            )
-
-        elif LLM_PROVIDER == "openai-compatible":
-            print(
-                f"USING OPENAI-COMPATIBLE: MODEL={LLM_MODEL}"
-            )
-
-            from app.llm.openai_client import OpenAICompatibleClient
-
-            llm = OpenAICompatibleClient(
-                api_key=LLM_API_KEY,
-                model=LLM_MODEL,
-                base_url=LLM_BASE_URL,
-            )
-
-        else:
-            raise LLMError(
-                f"Unsupported LLM provider: {LLM_PROVIDER}"
-            )
+        print(f"Using Ollama model: {LLM_MODEL}")
+        llm = OllamaClient(
+            base_url=OLLAMA_BASE_URL,
+            model=LLM_MODEL,
+        )
 
         from app.analysis.summarize import summarize_paper
 
         section_pairs = [
-            (section.name, section.text)
+            (f"{section.name} (page {page_number})", page_text)
             for section in sections
+            for page_number, page_text in (
+                section.page_parts
+                or ((section.start_page, section.text),)
+            )
         ]
 
         print(
             f"CALLING LLM FOR SUMMARY: {len(section_pairs)} sections"
         )
 
-        summary = summarize_paper(llm, section_pairs)
+        summary = summarize_paper(
+            llm,
+            section_pairs,
+            visual_context=_build_visual_context(parsed),
+        )
 
         print("LLM SUMMARY COMPLETE")
 
@@ -807,6 +810,65 @@ def get_paper(
     }
 
 
+@router.post(
+    "/{paper_id}/reprocess",
+    status_code=202,
+)
+def reprocess_paper(
+    paper_id: str,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+) -> dict:
+    paper = session.get(Paper, paper_id)
+
+    if paper is None:
+        raise _error(
+            404,
+            "PAPER_NOT_FOUND",
+            "The requested paper does not exist.",
+        )
+
+    if paper.status in {"queued", "processing"}:
+        raise _error(
+            409,
+            "PAPER_ALREADY_PROCESSING",
+            "The paper is already being processed.",
+        )
+
+    if not Path(paper.storage_path).is_file():
+        raise _error(
+            410,
+            "PDF_NOT_FOUND",
+            "The stored PDF is unavailable and cannot be reprocessed.",
+        )
+
+    job = IngestionJob(
+        id=uuid.uuid4().hex,
+        paper_id=paper.id,
+        status="queued",
+        progress=0,
+        stage="Queued",
+    )
+    paper.status = "queued"
+    paper.error_message = None
+    paper.updated_at = utc_now()
+    session.add(paper)
+    session.add(job)
+    session.commit()
+
+    background_tasks.add_task(
+        _run_ingestion,
+        paper.id,
+        job.id,
+    )
+
+    return {
+        "paper_id": paper.id,
+        "job_id": job.id,
+        "status": paper.status,
+    }
+
+
 @router.get("/{paper_id}/status")
 def paper_status(
     paper_id: str,
@@ -932,6 +994,19 @@ def get_summary(
         approach=data["approach"],
         main_result=data["main_result"],
         limitations=data.get("limitations", []),
+        key_findings=data.get("key_findings", []),
+        methodology_details=data.get("methodology_details", []),
+        datasets=data.get("datasets", []),
+        evaluation_metrics=data.get("evaluation_metrics", []),
+        quantitative_results=data.get("quantitative_results", []),
+        equations_and_calculations=data.get(
+            "equations_and_calculations",
+            [],
+        ),
+        analysis_of_visuals_and_tables=data.get(
+            "analysis_of_visuals_and_tables",
+            [],
+        ),
         key_points=[
             data["problem"],
             data["approach"],
@@ -939,4 +1014,162 @@ def get_summary(
             *data.get("limitations", []),
         ],
         citations=[],
+    )
+
+
+@router.get("/{paper_id}/assets")
+def get_paper_assets(
+    paper_id: str,
+    session: Session = Depends(get_session),
+) -> dict:
+    paper = session.get(Paper, paper_id)
+    if paper is None:
+        raise _error(
+            404,
+            "PAPER_NOT_FOUND",
+            "The requested paper does not exist.",
+        )
+    if paper.status != "ready":
+        raise _error(
+            409,
+            "PAPER_NOT_READY",
+            "Paper visuals are available after processing completes.",
+        )
+
+    from app.ingestion.loader import load_file
+    from app.ingestion.parser import parse_pdf
+
+    try:
+        parsed = parse_pdf(load_file(Path(paper.storage_path)))
+    except (OSError, ValueError) as exc:
+        raise _error(
+            422,
+            "ASSET_EXTRACTION_FAILED",
+            "The stored PDF could not be read to extract its figures and tables.",
+        ) from exc
+
+    return {
+        "paper_id": paper_id,
+        "figures": [
+            {
+                "page": figure.page,
+                "xref": figure.xref,
+                "caption": figure.caption,
+                "image_url": (
+                    f"/api/papers/{paper_id}/figures/"
+                    f"{figure.page}/{figure.xref}"
+                ),
+            }
+            for figure in parsed.figures
+        ],
+        "tables": [
+            {
+                "page": table.page,
+                "caption": table.caption,
+                "rows": table.rows,
+                "preview_only": table.preview_only,
+                "preview_url": (
+                    f"/api/papers/{paper_id}/tables/"
+                    f"{table.page}/"
+                    f"{sum(1 for previous in parsed.tables[:index] if previous.page == table.page)}"
+                    "/preview"
+                ),
+            }
+            for index, table in enumerate(parsed.tables)
+        ],
+        "equations": [
+            {
+                "page": equation.page,
+                "text": equation.text,
+            }
+            for equation in parsed.equations
+        ],
+    }
+
+
+@router.get("/{paper_id}/figures/{page_number}/{xref}")
+def get_paper_figure(
+    paper_id: str,
+    page_number: int,
+    xref: int,
+    session: Session = Depends(get_session),
+) -> Response:
+    paper = session.get(Paper, paper_id)
+    if paper is None:
+        raise _error(
+            404,
+            "PAPER_NOT_FOUND",
+            "The requested paper does not exist.",
+        )
+    if paper.status != "ready":
+        raise _error(
+            409,
+            "PAPER_NOT_READY",
+            "Paper figures are available after processing completes.",
+        )
+
+    from app.ingestion.loader import load_file
+    from app.ingestion.parser import extract_figure_image
+
+    try:
+        image, media_type = extract_figure_image(
+            load_file(Path(paper.storage_path)),
+            page_number,
+            xref,
+        )
+    except (OSError, ValueError) as exc:
+        raise _error(
+            404,
+            "FIGURE_NOT_FOUND",
+            "The requested figure could not be extracted from the PDF.",
+        ) from exc
+
+    return Response(
+        content=image,
+        media_type=media_type,
+        headers={"Cache-Control": "private, max-age=3600"},
+    )
+
+
+@router.get("/{paper_id}/tables/{page_number}/{table_index}/preview")
+def get_paper_table_preview(
+    paper_id: str,
+    page_number: int,
+    table_index: int,
+    session: Session = Depends(get_session),
+) -> Response:
+    paper = session.get(Paper, paper_id)
+    if paper is None:
+        raise _error(
+            404,
+            "PAPER_NOT_FOUND",
+            "The requested paper does not exist.",
+        )
+    if paper.status != "ready":
+        raise _error(
+            409,
+            "PAPER_NOT_READY",
+            "Paper table previews are available after processing completes.",
+        )
+
+    from app.ingestion.loader import load_file
+    from app.ingestion.parser import extract_table_preview
+
+    try:
+        image = extract_table_preview(
+            load_file(Path(paper.storage_path)),
+            page_number,
+            table_index,
+        )
+    except (OSError, ValueError) as exc:
+        raise _error(
+            404,
+            "TABLE_NOT_FOUND",
+            "The requested table preview could not be extracted.",
+        ) from exc
+
+    return Response(
+        content=image,
+        media_type="image/png",
+        headers={"Cache-Control": "private, max-age=3600"},
     )
